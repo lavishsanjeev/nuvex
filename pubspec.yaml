@@ -78,14 +78,14 @@ flutter:
 flutter_launcher_icons:
   android: true
   ios: true
-  image_path: "assets/icon/app_logo.png"
+  image_path: "assets/icon/applogo.png"
   min_sdk_android: 21
   web:
     generate: true
-    image_path: "assets/icon/app_logo.png"
+    image_path: "assets/icon/applogo.png"
   windows:
     generate: true
-    image_path: "assets/icon/app_logo.png"
+    image_path: "assets/icon/applogo.png"
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images
