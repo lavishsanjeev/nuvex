@@ -24,6 +24,15 @@ class NativeMediaService {
   })?
   shareFileMock;
 
+  /// Optional test hook to mock native bulk share behavior without depending on Android OS.
+  @visibleForTesting
+  static Future<bool> Function({
+    required List<String> filePaths,
+    required List<String> mimeTypes,
+    required String title,
+  })?
+  shareFilesMock;
+
   /// Resolves an exact and standard MIME type from filename and given MIME.
   static String resolveMimeType({
     required String fileName,
@@ -105,6 +114,63 @@ class NativeMediaService {
       return true;
     } on PlatformException catch (e) {
       debugPrint('[NATIVE] shareFile PlatformException: ${e.message}');
+      rethrow;
+    }
+  }
+
+  /// Shares multiple locally cached media files in a single native share sheet invocation.
+  static Future<bool> shareFiles({
+    required List<String> filePaths,
+    List<String>? mimeTypes,
+    required String title,
+  }) async {
+    if (filePaths.isEmpty) {
+      return false;
+    }
+
+    for (final path in filePaths) {
+      final file = File(path);
+      if (!await file.exists() || await file.length() <= 0) {
+        throw FileSystemException(
+          'Cannot share file: local file does not exist or is empty',
+          path,
+        );
+      }
+    }
+
+    if (shareFilesMock != null) {
+      return shareFilesMock!(
+        filePaths: filePaths,
+        mimeTypes: mimeTypes ?? const [],
+        title: title,
+      );
+    }
+
+    // Compatibility hook: if a single file is shared and only shareFileMock is registered
+    if (filePaths.length == 1 && shareFileMock != null) {
+      return shareFileMock!(
+        filePath: filePaths.first,
+        mimeType: (mimeTypes != null && mimeTypes.isNotEmpty)
+            ? mimeTypes.first
+            : '*/*',
+        title: title,
+      );
+    }
+
+    try {
+      final success = await _channel.invokeMethod<bool>('shareFiles', {
+        'filePaths': filePaths,
+        'mimeTypes': mimeTypes ?? const [],
+        'title': title,
+      });
+      return success ?? true;
+    } on MissingPluginException {
+      debugPrint(
+        '[NATIVE] shareFiles: MissingPluginException (non-Android / test)',
+      );
+      return true;
+    } on PlatformException catch (e) {
+      debugPrint('[NATIVE] shareFiles PlatformException: ${e.message}');
       rethrow;
     }
   }

@@ -17,6 +17,7 @@ class _ActiveStreamSession {
   final DateTime createdAt;
   int? lastRequestedStart;
   int? lastRequestedEnd;
+  int activeRequestId = 0;
 
   _ActiveStreamSession({
     required this.file,
@@ -130,8 +131,10 @@ class VideoStreamingProxy {
 
   /// Unregisters an active streaming session when the viewer moves away or disposes.
   void unregisterFile(int messageId) {
-    _sessions.remove(messageId);
-    if (VideoPrefetchManager.instance.currentFile?.telegramMessageId == messageId) {
+    final session = _sessions.remove(messageId);
+    session?.activeRequestId++;
+    if (VideoPrefetchManager.instance.currentFile?.telegramMessageId ==
+        messageId) {
       VideoPrefetchManager.instance.stop();
     }
   }
@@ -366,9 +369,7 @@ class VideoStreamingProxy {
         contentLength.toString(),
       );
 
-      debugPrint(
-        '[PROXY] request range=$start-$end',
-      );
+      debugPrint('[PROXY] request range=$start-$end');
       debugPrint(
         '[STREAM_RANGE] Range: $rangeHeader -> bytes $start-$end/$totalSize (len: $contentLength)',
       );
@@ -460,6 +461,7 @@ class VideoStreamingProxy {
 
     // Track sequential vs seek positions to avoid canceling prefetch on normal continuous playback
     final session = _sessions[file.telegramMessageId];
+    final currentRequestId = session != null ? ++session.activeRequestId : 0;
     final prevStart = session?.lastRequestedStart;
     final prevEnd = session?.lastRequestedEnd;
     session?.lastRequestedStart = start;
@@ -493,9 +495,10 @@ class VideoStreamingProxy {
 
     try {
       for (int c = startChunk; c <= endChunk; c++) {
-        if (clientDisconnected) {
+        if (clientDisconnected ||
+            (session != null && session.activeRequestId != currentRequestId)) {
           debugPrint(
-            '[STREAM_CLIENT_DISCONNECTED] Client disconnected, halting chunk loop at $c',
+            '[STREAM_CLIENT_DISCONNECTED] Client disconnected or request superseded ($currentRequestId vs ${session?.activeRequestId}), halting chunk loop at $c',
           );
           break;
         }
@@ -534,7 +537,8 @@ class VideoStreamingProxy {
         final chunk = await playbackChunkFuture;
         final chunkCompletionTime = DateTime.now();
 
-        if (clientDisconnected) {
+        if (clientDisconnected ||
+            (session != null && session.activeRequestId != currentRequestId)) {
           debugPrint(
             '[STREAM_CLIENT_DISCONNECTED] Client disconnected after fetching chunk $c',
           );
@@ -561,11 +565,22 @@ class VideoStreamingProxy {
           );
 
           response.add(slice);
+          try {
+            await response.flush();
+          } catch (e) {
+            clientDisconnected = true;
+            debugPrint(
+              '[STREAM_CLIENT_DISCONNECTED] Socket flush failed/closed: $e',
+            );
+            break;
+          }
           final proxySentTime = DateTime.now();
-          trace.timeFromChunkCompletionToProxyMs =
-              proxySentTime.difference(chunkCompletionTime).inMilliseconds;
-          trace.totalEndToEndLatencyMs =
-              proxySentTime.difference(trace.traceStartTime).inMilliseconds;
+          trace.timeFromChunkCompletionToProxyMs = proxySentTime
+              .difference(chunkCompletionTime)
+              .inMilliseconds;
+          trace.totalEndToEndLatencyMs = proxySentTime
+              .difference(trace.traceStartTime)
+              .inMilliseconds;
           trace.logSummary();
 
           if (!firstChunkLogged) {

@@ -69,11 +69,11 @@ void main() {
     tempDir = await Directory.systemTemp.createTemp('nuvex_account_test_');
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
-      const MethodChannel('plugins.flutter.io/path_provider'),
-      (MethodCall methodCall) async {
-        return tempDir.path;
-      },
-    );
+          const MethodChannel('plugins.flutter.io/path_provider'),
+          (MethodCall methodCall) async {
+            return tempDir.path;
+          },
+        );
 
     testDb = await databaseFactoryFfi.openDatabase(
       inMemoryDatabasePath,
@@ -115,9 +115,9 @@ void main() {
   tearDown(() async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
-      const MethodChannel('plugins.flutter.io/path_provider'),
-      null,
-    );
+          const MethodChannel('plugins.flutter.io/path_provider'),
+          null,
+        );
     await testDb.close();
     if (tempDir.existsSync()) {
       tempDir.deleteSync(recursive: true);
@@ -206,7 +206,9 @@ void main() {
   }
 
   group('Account & Storage Dashboard Tests', () {
-    testWidgets('1. Profile button on PhotosScreen opens AccountScreen', (tester) async {
+    testWidgets('1. Profile button on PhotosScreen opens AccountScreen', (
+      tester,
+    ) async {
       await tester.runAsync(() async {
         final mockAuth = MockTelegramAuthService(
           mockUser: const NuvexTelegramUser(
@@ -218,7 +220,10 @@ void main() {
           ),
         );
         final authController = AuthController(telegramService: mockAuth);
-        final repo = MediaRepository(database: nuvexDb, mediaService: MockTelegramMediaService());
+        final repo = MediaRepository(
+          database: nuvexDb,
+          mediaService: MockTelegramMediaService(),
+        );
         final mediaController = MediaController(repository: repo);
 
         await tester.pumpWidget(
@@ -250,7 +255,9 @@ void main() {
       });
     });
 
-    testWidgets('2. Profile button on CollectionsScreen opens AccountScreen', (tester) async {
+    testWidgets('2. Profile button on CollectionsScreen opens AccountScreen', (
+      tester,
+    ) async {
       await tester.runAsync(() async {
         final mockAuth = MockTelegramAuthService(
           mockUser: const NuvexTelegramUser(
@@ -261,7 +268,10 @@ void main() {
           ),
         );
         final authController = AuthController(telegramService: mockAuth);
-        final repo = MediaRepository(database: nuvexDb, mediaService: MockTelegramMediaService());
+        final repo = MediaRepository(
+          database: nuvexDb,
+          mediaService: MockTelegramMediaService(),
+        );
         final mediaController = MediaController(repository: repo);
 
         await tester.pumpWidget(
@@ -278,7 +288,9 @@ void main() {
         await tester.pump();
 
         // Find the collections profile avatar button
-        final avatarBtn = find.byKey(const ValueKey('profile_avatar_button_collections'));
+        final avatarBtn = find.byKey(
+          const ValueKey('profile_avatar_button_collections'),
+        );
         expect(avatarBtn, findsOneWidget);
 
         // Tap avatar button
@@ -292,7 +304,9 @@ void main() {
       });
     });
 
-    testWidgets('3. Displays real Telegram account details and user ID', (tester) async {
+    testWidgets('3. Displays real Telegram account details and user ID', (
+      tester,
+    ) async {
       await tester.runAsync(() async {
         const testUser = NuvexTelegramUser(
           id: 9876543,
@@ -305,7 +319,10 @@ void main() {
         final authController = AuthController(telegramService: mockAuth);
         await authController.refreshCurrentUser();
 
-        final repo = MediaRepository(database: nuvexDb, mediaService: MockTelegramMediaService());
+        final repo = MediaRepository(
+          database: nuvexDb,
+          mediaService: MockTelegramMediaService(),
+        );
         final mediaController = MediaController(repository: repo);
 
         await tester.pumpWidget(
@@ -328,130 +345,162 @@ void main() {
       });
     });
 
-    testWidgets('4. Storage card displays real SQLite calculations and no fake quota', (tester) async {
-      tester.view.physicalSize = const Size(800, 2400);
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(() => tester.view.resetPhysicalSize());
+    testWidgets(
+      '4. Storage card displays real SQLite calculations and no fake quota',
+      (tester) async {
+        tester.view.physicalSize = const Size(800, 2400);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(() => tester.view.resetPhysicalSize());
 
-      await tester.runAsync(() async {
-        final files = createSampleFiles();
-        await nuvexDb.upsertFiles(files);
+        await tester.runAsync(() async {
+          final files = createSampleFiles();
+          await nuvexDb.upsertFiles(files);
 
-        final repo = MediaRepository(database: nuvexDb, mediaService: MockTelegramMediaService());
-        final mediaController = MediaController(repository: repo);
-        await mediaController.loadCacheOnly();
+          final repo = MediaRepository(
+            database: nuvexDb,
+            mediaService: MockTelegramMediaService(),
+          );
+          final mediaController = MediaController(repository: repo);
+          await mediaController.loadCacheOnly();
 
-        await tester.pumpWidget(
-          MaterialApp(
-            home: AccountScreen(
-              mediaController: mediaController,
+          await tester.pumpWidget(
+            MaterialApp(home: AccountScreen(mediaController: mediaController)),
+          );
+          await tester.pump();
+          await Future.delayed(const Duration(milliseconds: 200));
+          await tester.pump();
+
+          // Total files = 3 photos + 2 videos + 1 doc = 6 files
+          expect(find.text('6 files'), findsOneWidget);
+
+          // Total bytes = 10MB + 40MB + 4MB = 54 MB
+          expect(find.text('54 MB'), findsOneWidget);
+
+          // Quota unavailable notice is explicitly displayed (no invented quota!)
+          expect(
+            find.text(
+              'Cloud storage quota not provided • Telegram Saved Messages',
             ),
-          ),
-        );
-        await tester.pump();
-        await Future.delayed(const Duration(milliseconds: 200));
-        await tester.pump();
+            findsOneWidget,
+          );
 
-        // Total files = 3 photos + 2 videos + 1 doc = 6 files
-        expect(find.text('6 files'), findsOneWidget);
+          // Verify category breakdowns in legend
+          expect(find.text('Photos'), findsWidgets);
+          expect(find.text('(3)'), findsOneWidget);
+          expect(find.text('10 MB'), findsOneWidget);
 
-        // Total bytes = 10MB + 40MB + 4MB = 54 MB
-        expect(find.text('54 MB'), findsOneWidget);
+          expect(find.text('Videos'), findsWidgets);
+          expect(find.text('(2)'), findsOneWidget);
+          expect(find.text('40 MB'), findsOneWidget);
 
-        // Quota unavailable notice is explicitly displayed (no invented quota!)
-        expect(
-          find.text('Cloud storage quota not provided • Telegram Saved Messages'),
-          findsOneWidget,
-        );
+          expect(find.text('Documents & Files'), findsOneWidget);
+          expect(find.text('(1)'), findsOneWidget);
+          expect(find.text('4.0 MB'), findsOneWidget);
+        });
+      },
+    );
 
-        // Verify category breakdowns in legend
-        expect(find.text('Photos'), findsWidgets);
-        expect(find.text('(3)'), findsOneWidget);
-        expect(find.text('10 MB'), findsOneWidget);
+    testWidgets(
+      '5. Tapping Largest Files opens CollectionDetailScreen sorted by size',
+      (tester) async {
+        tester.view.physicalSize = const Size(800, 2400);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(() => tester.view.resetPhysicalSize());
 
-        expect(find.text('Videos'), findsWidgets);
-        expect(find.text('(2)'), findsOneWidget);
-        expect(find.text('40 MB'), findsOneWidget);
+        await tester.runAsync(() async {
+          final files = createSampleFiles();
+          await nuvexDb.upsertFiles(files);
 
-        expect(find.text('Documents & Files'), findsOneWidget);
-        expect(find.text('(1)'), findsOneWidget);
-        expect(find.text('4.0 MB'), findsOneWidget);
-      });
-    });
+          final repo = MediaRepository(
+            database: nuvexDb,
+            mediaService: MockTelegramMediaService(),
+          );
+          final mediaController = MediaController(repository: repo);
 
-    testWidgets('5. Tapping Largest Files opens CollectionDetailScreen sorted by size', (tester) async {
-      tester.view.physicalSize = const Size(800, 2400);
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(() => tester.view.resetPhysicalSize());
+          await tester.pumpWidget(
+            MaterialApp(home: AccountScreen(mediaController: mediaController)),
+          );
+          await tester.pump();
+          await Future.delayed(const Duration(milliseconds: 100));
+          await tester.pump();
 
-      await tester.runAsync(() async {
-        final files = createSampleFiles();
-        await nuvexDb.upsertFiles(files);
+          // Find Largest Files tile
+          final largestTile = find.text('Largest Files');
+          expect(largestTile, findsOneWidget);
 
-        final repo = MediaRepository(database: nuvexDb, mediaService: MockTelegramMediaService());
-        final mediaController = MediaController(repository: repo);
+          // Tap it
+          await tester.tap(largestTile);
+          await tester.pump();
+          await Future.delayed(const Duration(milliseconds: 100));
+          await tester.pump();
 
-        await tester.pumpWidget(
-          MaterialApp(
-            home: AccountScreen(
-              mediaController: mediaController,
-            ),
-          ),
-        );
-        await tester.pump();
-        await Future.delayed(const Duration(milliseconds: 100));
-        await tester.pump();
+          // Verify CollectionDetailScreen opened with Largest Files
+          expect(find.byType(CollectionDetailScreen), findsOneWidget);
 
-        // Find Largest Files tile
-        final largestTile = find.text('Largest Files');
-        expect(largestTile, findsOneWidget);
+          // Check that files are sorted descending by size
+          final largestFiles = await repo.getCachedFilesByCategory(
+            'largest_files',
+          );
+          expect(largestFiles.length, 6);
+          expect(largestFiles.first.name, 'video_movie.mp4'); // 25 MB
+          expect(largestFiles[1].name, 'video_clip.mp4'); // 15 MB
+          expect(largestFiles.last.name, 'photo_small.jpg'); // 2 MB
+        });
+      },
+    );
 
-        // Tap it
-        await tester.tap(largestTile);
-        await tester.pump();
-        await Future.delayed(const Duration(milliseconds: 100));
-        await tester.pump();
+    testWidgets(
+      '6. Cache clearing cleans local disk without deleting cloud files or DB metadata',
+      (tester) async {
+        await tester.runAsync(() async {
+          final files = createSampleFiles();
+          await nuvexDb.upsertFiles(files);
 
-        // Verify CollectionDetailScreen opened with Largest Files
-        expect(find.byType(CollectionDetailScreen), findsOneWidget);
+          // Create fake cache files in tempDir
+          final thumbDir = Directory('${tempDir.path}/nuvex_thumbs')
+            ..createSync();
+          final videoDir = Directory('${tempDir.path}/nuvex_stream_cache')
+            ..createSync();
+          final mediaDir = Directory('${tempDir.path}/nuvex_media')
+            ..createSync();
 
-        // Check that files are sorted descending by size
-        final largestFiles = await repo.getCachedFilesByCategory('largest_files');
-        expect(largestFiles.length, 6);
-        expect(largestFiles.first.name, 'video_movie.mp4'); // 25 MB
-        expect(largestFiles[1].name, 'video_clip.mp4'); // 15 MB
-        expect(largestFiles.last.name, 'photo_small.jpg'); // 2 MB
-      });
-    });
+          File('${thumbDir.path}/thumb_1.jpg')
+              .writeAsBytesSync(List.filled(1024, 0));
+          File('${videoDir.path}/chunk_1.bin')
+              .writeAsBytesSync(List.filled(2048, 0));
+          File('${mediaDir.path}/full_media_1.mp4')
+              .writeAsBytesSync(List.filled(4096, 0));
 
-    testWidgets('6. Cache clearing cleans local disk without deleting cloud files or DB metadata', (tester) async {
-      await tester.runAsync(() async {
-        final files = createSampleFiles();
-        await nuvexDb.upsertFiles(files);
+          final repo = MediaRepository(
+            database: nuvexDb,
+            mediaService: MockTelegramMediaService(),
+          );
 
-        // Create fake cache files in tempDir
-        final thumbDir = Directory('${tempDir.path}/nuvex_thumbs')..createSync();
-        final videoDir = Directory('${tempDir.path}/nuvex_stream_cache')..createSync();
-        final mediaDir = Directory('${tempDir.path}/nuvex_media')..createSync();
+          final cacheManager = StorageCacheManager(
+            customBasePath: tempDir.path,
+          );
+          // Test cache manager methods
+          await cacheManager.clearAllCache();
 
-        File('${thumbDir.path}/thumb_1.jpg').writeAsBytesSync(List.filled(1024, 0));
-        File('${videoDir.path}/chunk_1.bin').writeAsBytesSync(List.filled(2048, 0));
-        File('${mediaDir.path}/full_media_1.mp4').writeAsBytesSync(List.filled(4096, 0));
+          // Verify SQLite metadata is 100% PRESERVED
+          final statsAfter = await repo.getStorageStats();
+          expect(
+            statsAfter.totalCount,
+            6,
+            reason: 'Database records must NOT be deleted by cache clearing',
+          );
+          expect(
+            statsAfter.totalBytes,
+            54 * 1024 * 1024,
+            reason: 'Indexed metadata must remain untouched',
+          );
+        });
+      },
+    );
 
-        final repo = MediaRepository(database: nuvexDb, mediaService: MockTelegramMediaService());
-
-        final cacheManager = StorageCacheManager(customBasePath: tempDir.path);
-        // Test cache manager methods
-        await cacheManager.clearAllCache();
-
-        // Verify SQLite metadata is 100% PRESERVED
-        final statsAfter = await repo.getStorageStats();
-        expect(statsAfter.totalCount, 6, reason: 'Database records must NOT be deleted by cache clearing');
-        expect(statsAfter.totalBytes, 54 * 1024 * 1024, reason: 'Indexed metadata must remain untouched');
-      });
-    });
-
-    testWidgets('7. Sync now invokes media sync and updates UI', (tester) async {
+    testWidgets('7. Sync now invokes media sync and updates UI', (
+      tester,
+    ) async {
       tester.view.physicalSize = const Size(800, 2400);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(() => tester.view.resetPhysicalSize());
@@ -488,7 +537,10 @@ void main() {
         await tester.pump();
 
         for (int i = 0; i < 20; i++) {
-          if (!mediaController.isSyncing && mediaController.recentMedia.isNotEmpty) break;
+          if (!mediaController.isSyncing &&
+              mediaController.recentMedia.isNotEmpty) {
+            break;
+          }
           await Future.delayed(const Duration(milliseconds: 100));
           await tester.pump();
         }
@@ -500,57 +552,61 @@ void main() {
       });
     });
 
-    testWidgets('8. Logout shows confirmation dialog and safely disconnects session', (tester) async {
-      tester.view.physicalSize = const Size(800, 2400);
-      tester.view.devicePixelRatio = 1.0;
-      addTearDown(() => tester.view.resetPhysicalSize());
+    testWidgets(
+      '8. Logout shows confirmation dialog and safely disconnects session',
+      (tester) async {
+        tester.view.physicalSize = const Size(800, 2400);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(() => tester.view.resetPhysicalSize());
 
-      await tester.runAsync(() async {
-        final mockAuth = MockTelegramAuthService(
-          mockUser: const NuvexTelegramUser(id: 123, firstName: 'Bob'),
-        );
-        final authController = AuthController(telegramService: mockAuth);
+        await tester.runAsync(() async {
+          final mockAuth = MockTelegramAuthService(
+            mockUser: const NuvexTelegramUser(id: 123, firstName: 'Bob'),
+          );
+          final authController = AuthController(telegramService: mockAuth);
 
-        await tester.pumpWidget(
-          MaterialApp(
-            routes: {
-              NuvexRoutes.gettingStarted: (_) => const Scaffold(body: Text('Onboarding Screen')),
-            },
-            home: AccountScreen(
-              authController: authController,
+          await tester.pumpWidget(
+            MaterialApp(
+              routes: {
+                NuvexRoutes.gettingStarted: (_) =>
+                    const Scaffold(body: Text('Onboarding Screen')),
+              },
+              home: AccountScreen(authController: authController),
             ),
-          ),
-        );
-        await tester.pump();
+          );
+          await tester.pump();
 
-        // Tap logout button
-        final logoutBtn = find.byKey(const ValueKey('logout_button'));
-        expect(logoutBtn, findsOneWidget);
-        await tester.tap(logoutBtn);
-        await tester.pump();
-        await Future.delayed(const Duration(milliseconds: 100));
-        await tester.pump();
+          // Tap logout button
+          final logoutBtn = find.byKey(const ValueKey('logout_button'));
+          expect(logoutBtn, findsOneWidget);
+          await tester.tap(logoutBtn);
+          await tester.pump();
+          await Future.delayed(const Duration(milliseconds: 100));
+          await tester.pump();
 
-        // Verify confirmation dialog appeared
-        expect(find.text('Log out of Nuvex?'), findsOneWidget);
-        expect(
-          find.textContaining('All your photos, videos, and files remain completely safe'),
-          findsOneWidget,
-        );
+          // Verify confirmation dialog appeared
+          expect(find.text('Log out of Nuvex?'), findsOneWidget);
+          expect(
+            find.textContaining(
+              'All your photos, videos, and files remain completely safe',
+            ),
+            findsOneWidget,
+          );
 
-        // Tap "Log Out" inside dialog
-        final confirmBtn = find.widgetWithText(ElevatedButton, 'Log Out');
-        await tester.tap(confirmBtn);
-        await tester.pump();
-        await Future.delayed(const Duration(milliseconds: 300));
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
-        await tester.pump();
+          // Tap "Log Out" inside dialog
+          final confirmBtn = find.widgetWithText(ElevatedButton, 'Log Out');
+          await tester.tap(confirmBtn);
+          await tester.pump();
+          await Future.delayed(const Duration(milliseconds: 300));
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+          await tester.pump();
 
-        // Verify session was disconnected
-        expect(mockAuth.isDisconnected, isTrue);
-        expect(find.text('Onboarding Screen'), findsOneWidget);
-      });
-    });
+          // Verify session was disconnected
+          expect(mockAuth.isDisconnected, isTrue);
+          expect(find.text('Onboarding Screen'), findsOneWidget);
+        });
+      },
+    );
   });
 }

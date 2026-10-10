@@ -59,9 +59,8 @@ class VideoPrefetchManager {
   DateTime? _lastPlayerLogTime;
   bool _refillInProgress = false;
 
-  VideoPrefetchManager({
-    VideoRangeCacheManager? cacheManager,
-  }) : _cacheManager = cacheManager ?? VideoRangeCacheManager.instance;
+  VideoPrefetchManager({VideoRangeCacheManager? cacheManager})
+    : _cacheManager = cacheManager ?? VideoRangeCacheManager.instance;
 
   static final VideoPrefetchManager instance = VideoPrefetchManager();
 
@@ -75,6 +74,8 @@ class VideoPrefetchManager {
   bool get isRunning => _isRunning;
   bool get isPlaying => _isPlaying;
   bool get isBuffering => _isBuffering;
+  Duration get playerPosition => _playerPosition;
+  Duration get playerDuration => _playerDuration;
 
   /// Starts a prefetch session for [file] using [mediaService].
   void start({
@@ -168,6 +169,12 @@ class VideoPrefetchManager {
     _authoritativeBytePosition = newBytePosition;
   }
 
+  DateTime? _lastRefillCheckTime;
+  Duration _lastCheckedPosition = Duration.zero;
+  bool _lastRecordedBuffering = false;
+  bool _lastRecordedPlaying = false;
+  DateTime? _lastPrefetchLogTime;
+
   /// Updates player playback state and instruments [PLAYER] logs.
   void updatePlayerState({
     required Duration position,
@@ -182,11 +189,11 @@ class VideoPrefetchManager {
     _isPlaying = isPlaying;
     _isBuffering = isBuffering;
 
-    // Rate-limited [PLAYER] logging (at most once every 500ms unless buffering state changes)
     final now = DateTime.now();
+    // Rate-limited [PLAYER] logging (at most once every 500ms unless buffering state changes)
     if (_lastPlayerLogTime == null ||
         now.difference(_lastPlayerLogTime!).inMilliseconds >= 500 ||
-        isBuffering) {
+        isBuffering != _lastRecordedBuffering) {
       _lastPlayerLogTime = now;
       final bufferedStr = _playerBuffered
           .map((r) => '${r.start.inMilliseconds}-${r.end.inMilliseconds}ms')
@@ -195,8 +202,25 @@ class VideoPrefetchManager {
       debugPrint('[PLAYER] buffered=$bufferedStr');
     }
 
-    // If playback is active or player is buffering, maintain proactive buffer
-    if (_isPlaying || _isBuffering) {
+    // Rate-limit buffer checking to avoid running file stat / cache checks on every 16ms animation frame
+    final bool bufferingChanged = isBuffering != _lastRecordedBuffering;
+    final bool playingChanged = isPlaying != _lastRecordedPlaying;
+    final bool positionMovedSignificantly =
+        (position - _lastCheckedPosition).abs().inMilliseconds >= 1000;
+    final bool intervalElapsed =
+        _lastRefillCheckTime == null ||
+        now.difference(_lastRefillCheckTime!).inMilliseconds >= 500;
+
+    if ((_isPlaying || _isBuffering) &&
+        (bufferingChanged ||
+            playingChanged ||
+            positionMovedSignificantly ||
+            intervalElapsed)) {
+      _lastRefillCheckTime = now;
+      _lastCheckedPosition = position;
+      _lastRecordedBuffering = isBuffering;
+      _lastRecordedPlaying = isPlaying;
+
       final file = _currentFile;
       if (file != null && file.sizeBytes > 0) {
         final bufferedAhead = _cacheManager.getContiguousBufferedAhead(
@@ -233,9 +257,14 @@ class VideoPrefetchManager {
         totalSize,
       );
 
-      debugPrint('[PREFETCH] position=$currentPos');
-      debugPrint('[PREFETCH] bufferedAhead=$bufferedAhead');
-      debugPrint('[PREFETCH] targetAhead=$_targetAheadBytes');
+      final now = DateTime.now();
+      if (_lastPrefetchLogTime == null ||
+          now.difference(_lastPrefetchLogTime!).inMilliseconds >= 500) {
+        _lastPrefetchLogTime = now;
+        debugPrint('[PREFETCH] position=$currentPos');
+        debugPrint('[PREFETCH] bufferedAhead=$bufferedAhead');
+        debugPrint('[PREFETCH] targetAhead=$_targetAheadBytes');
+      }
 
       final startChunk = currentPos ~/ chunkSize;
       final totalChunks = (totalSize + chunkSize - 1) ~/ chunkSize;
@@ -243,7 +272,8 @@ class VideoPrefetchManager {
       final targetEndChunk = (desiredEndByte - 1) ~/ chunkSize;
 
       for (int c = startChunk; c <= targetEndChunk && c < totalChunks; c++) {
-        if (!_isRunning || _currentFile?.telegramMessageId != file.telegramMessageId) {
+        if (!_isRunning ||
+            _currentFile?.telegramMessageId != file.telegramMessageId) {
           break;
         }
 
@@ -292,11 +322,13 @@ class VideoPrefetchManager {
     final sw = Stopwatch()..start();
 
     try {
-      // Pause if playback request is actively fetching
-      while (_cacheManager.hasActivePlaybackRequests &&
-          generation == _generation &&
-          _isRunning) {
-        await Future.delayed(const Duration(milliseconds: 20));
+      // Rule 3: Playback requests strictly prioritized over background prefetch.
+      // Yield immediately if an active playback chunk is being retrieved.
+      if (_cacheManager.hasActivePlaybackRequests) {
+        debugPrint(
+          '[PREFETCH] Yielding chunk $chunkIndex to active playback request',
+        );
+        return;
       }
 
       if (generation != _generation ||

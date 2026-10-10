@@ -44,7 +44,9 @@ class StorageCacheManager {
   Future<String> _getBasePath() async {
     if (customBasePath != null) return customBasePath!;
     try {
-      final dir = await getApplicationDocumentsDirectory().timeout(const Duration(milliseconds: 500));
+      final dir = await getApplicationDocumentsDirectory().timeout(
+        const Duration(milliseconds: 500),
+      );
       return dir.path;
     } catch (_) {
       return Directory.systemTemp.path;

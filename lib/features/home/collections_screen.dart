@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../app/theme.dart';
@@ -6,14 +7,16 @@ import '../auth/controllers/auth_controller.dart';
 import '../../telegram/telegram_media_service.dart';
 import 'collection_detail_screen.dart';
 import 'controllers/media_controller.dart';
+import 'recently_deleted_screen.dart';
 import 'repositories/media_repository.dart';
 import 'widgets/collection_card.dart';
 import 'widgets/collection_row.dart';
 
 /// The Nuvex Collections screen connected to real Telegram data from SQLite.
 ///
-/// Complies strictly with Task 5 requirements:
+/// Complies strictly with Task 5 & Real-Time Collections specifications:
 /// - Real counts derived from SQLite database
+/// - Real thumbnails derived from SQLite-indexed Telegram media
 /// - Real categories (Documents, Places, Stickers, Moments, etc.)
 /// - Tapping an empty category navigates to clean empty state
 /// - Responsive grid layout with zero RenderFlex overflow
@@ -29,6 +32,8 @@ class CollectionsScreen extends StatefulWidget {
 
 class _CollectionsScreenState extends State<CollectionsScreen> {
   late final MediaController _mediaController;
+  Map<String, int>? _lastCounts;
+  Map<String, String?>? _lastThumbs;
 
   @override
   void initState() {
@@ -44,11 +49,22 @@ class _CollectionsScreenState extends State<CollectionsScreen> {
                 )
               : null,
         );
+    _lastCounts = Map.of(_mediaController.collectionCounts);
+    _lastThumbs = Map.of(_mediaController.collectionThumbnails);
     _mediaController.addListener(_onCountsChanged);
+    if (_mediaController.status == MediaLoadingStatus.initial) {
+      _mediaController.loadCacheOnly();
+    }
   }
 
   void _onCountsChanged() {
-    if (mounted) {
+    if (!mounted) return;
+    final currentCounts = _mediaController.collectionCounts;
+    final currentThumbs = _mediaController.collectionThumbnails;
+    if (!mapEquals(currentCounts, _lastCounts) ||
+        !mapEquals(currentThumbs, _lastThumbs)) {
+      _lastCounts = Map.of(currentCounts);
+      _lastThumbs = Map.of(currentThumbs);
       setState(() {});
     }
   }
@@ -72,6 +88,18 @@ class _CollectionsScreenState extends State<CollectionsScreen> {
     );
   }
 
+  void _openRecentlyDeleted() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => RecentlyDeletedScreen(
+          repository: _mediaController.repository,
+          mediaController: _mediaController,
+        ),
+      ),
+    );
+  }
+
+  @override
   @override
   Widget build(BuildContext context) {
     final user = widget.controller?.currentUser;
@@ -80,11 +108,25 @@ class _CollectionsScreenState extends State<CollectionsScreen> {
         ? displayName.trim()[0].toUpperCase()
         : 'U';
     final counts = _mediaController.collectionCounts;
+    final thumbs = _mediaController.collectionThumbnails;
 
-    return SafeArea(
+    final topInset = MediaQuery.paddingOf(context).top;
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+
+    return RefreshIndicator(
+      onRefresh: () => _mediaController.syncMedia(),
+      color: NuvexColors.primaryBlue,
+      edgeOffset: topInset,
       child: SingleChildScrollView(
-        physics: const BouncingScrollPhysics(),
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+        physics: const AlwaysScrollableScrollPhysics(
+          parent: BouncingScrollPhysics(),
+        ),
+        padding: EdgeInsets.only(
+          left: 20,
+          right: 20,
+          top: topInset + 8,
+          bottom: bottomInset > 0 ? bottomInset + 84 : 96,
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -156,48 +198,111 @@ class _CollectionsScreenState extends State<CollectionsScreen> {
 
             const SizedBox(height: 24),
 
-            // ── Primary Cards: 2x2 Grid with Real DB Counts ──
-            GridView.count(
-              crossAxisCount: 2,
-              crossAxisSpacing: 14,
-              mainAxisSpacing: 14,
-              childAspectRatio: 1.22,
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              children: [
-                CollectionCard(
-                  title: 'Documents',
-                  icon: Icons.description_outlined,
-                  iconColor: const Color(0xFF2563EB),
-                  badgeBackground: const Color(0xFFEFF6FF),
-                  count: counts['documents'],
-                  onTap: () => _openCategory('Documents', 'documents'),
-                ),
-                CollectionCard(
-                  title: 'Places',
-                  icon: Icons.place_outlined,
-                  iconColor: const Color(0xFF059669),
-                  badgeBackground: const Color(0xFFECFDF5),
-                  count: counts['places'],
-                  onTap: () => _openCategory('Places', 'places'),
-                ),
-                CollectionCard(
-                  title: 'Stickers',
-                  icon: Icons.sentiment_satisfied_alt_outlined,
-                  iconColor: const Color(0xFF7C3AED),
-                  badgeBackground: const Color(0xFFF5F3FF),
-                  count: counts['stickers'],
-                  onTap: () => _openCategory('Stickers', 'stickers'),
-                ),
-                CollectionCard(
-                  title: 'Moments',
-                  icon: Icons.auto_awesome_outlined,
-                  iconColor: const Color(0xFFE11D48),
-                  badgeBackground: const Color(0xFFFFF1F2),
-                  count: counts['moments'],
-                  onTap: () => _openCategory('Moments', 'moments'),
-                ),
-              ],
+            // ── Primary Cards: 2x2 Grid with Real DB Counts & Real Thumbnails ──
+            Builder(
+              builder: (context) {
+                final docPreview = _mediaController.getPreviewForCategory(
+                  'documents',
+                );
+                final placesPreview = _mediaController.getPreviewForCategory(
+                  'places',
+                );
+                final stickersPreview = _mediaController.getPreviewForCategory(
+                  'stickers',
+                );
+                final momentsPreview = _mediaController.getPreviewForCategory(
+                  'moments',
+                );
+
+                return GridView.count(
+                  crossAxisCount: 2,
+                  crossAxisSpacing: 14,
+                  mainAxisSpacing: 14,
+                  childAspectRatio: 1.22,
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  children: [
+                    docPreview != null
+                        ? CollectionCard.fromPreview(
+                            docPreview.copyWith(
+                              isLoading:
+                                  _mediaController.isSyncing &&
+                                  !docPreview.hasThumbnail,
+                            ),
+                            onTap: () =>
+                                _openCategory('Documents', 'documents'),
+                          )
+                        : CollectionCard(
+                            title: 'Documents',
+                            icon: Icons.description_outlined,
+                            iconColor: const Color(0xFF2563EB),
+                            badgeBackground: const Color(0xFFEFF6FF),
+                            count: counts['documents'],
+                            thumbnailPath: thumbs['documents'],
+                            isLoading: _mediaController.isSyncing,
+                            onTap: () =>
+                                _openCategory('Documents', 'documents'),
+                          ),
+                    placesPreview != null
+                        ? CollectionCard.fromPreview(
+                            placesPreview.copyWith(
+                              isLoading:
+                                  _mediaController.isSyncing &&
+                                  !placesPreview.hasThumbnail,
+                            ),
+                            onTap: () => _openCategory('Places', 'places'),
+                          )
+                        : CollectionCard(
+                            title: 'Places',
+                            icon: Icons.place_outlined,
+                            iconColor: const Color(0xFF059669),
+                            badgeBackground: const Color(0xFFECFDF5),
+                            count: counts['places'],
+                            thumbnailPath: thumbs['places'],
+                            isLoading: _mediaController.isSyncing,
+                            onTap: () => _openCategory('Places', 'places'),
+                          ),
+                    stickersPreview != null
+                        ? CollectionCard.fromPreview(
+                            stickersPreview.copyWith(
+                              isLoading:
+                                  _mediaController.isSyncing &&
+                                  !stickersPreview.hasThumbnail,
+                            ),
+                            onTap: () => _openCategory('Stickers', 'stickers'),
+                          )
+                        : CollectionCard(
+                            title: 'Stickers',
+                            icon: Icons.sentiment_satisfied_alt_outlined,
+                            iconColor: const Color(0xFF7C3AED),
+                            badgeBackground: const Color(0xFFF5F3FF),
+                            count: counts['stickers'],
+                            thumbnailPath: thumbs['stickers'],
+                            isLoading: _mediaController.isSyncing,
+                            onTap: () => _openCategory('Stickers', 'stickers'),
+                          ),
+                    momentsPreview != null
+                        ? CollectionCard.fromPreview(
+                            momentsPreview.copyWith(
+                              isLoading:
+                                  _mediaController.isSyncing &&
+                                  !momentsPreview.hasThumbnail,
+                            ),
+                            onTap: () => _openCategory('Moments', 'moments'),
+                          )
+                        : CollectionCard(
+                            title: 'Moments',
+                            icon: Icons.auto_awesome_outlined,
+                            iconColor: const Color(0xFFE11D48),
+                            badgeBackground: const Color(0xFFFFF1F2),
+                            count: counts['moments'],
+                            thumbnailPath: thumbs['moments'],
+                            isLoading: _mediaController.isSyncing,
+                            onTap: () => _openCategory('Moments', 'moments'),
+                          ),
+                  ],
+                );
+              },
             ),
 
             const SizedBox(height: 28),
@@ -283,6 +388,48 @@ class _CollectionsScreenState extends State<CollectionsScreen> {
                       onTap: () => _openCategory('Locked', 'locked'),
                     ),
                   ],
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 24),
+
+            // ── Utilities Section ──
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 4),
+              child: Text(
+                'Utilities',
+                style: TextStyle(
+                  fontFamily: NuvexTypography.primaryFamily,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                  color: NuvexColors.darkNavy,
+                  letterSpacing: -0.3,
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            Container(
+              decoration: BoxDecoration(
+                color: NuvexColors.white,
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: const Color(0xFFE5E9F0), width: 1),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x06000000),
+                    blurRadius: 16,
+                    offset: Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(24),
+                child: CollectionRow(
+                  title: 'Recently Deleted',
+                  icon: Icons.delete_outline_rounded,
+                  count: counts['recently_deleted'] ?? 0,
+                  onTap: _openRecentlyDeleted,
                 ),
               ),
             ),

@@ -27,7 +27,13 @@ class MockTelegramRangeService extends TelegramMediaService {
     required int offset,
     required int limit,
     Duration timeout = const Duration(seconds: 30),
-    void Function(DateTime start, DateTime end, int elapsedMs, int activeAtStart)? onMetrics,
+    void Function(
+      DateTime start,
+      DateTime end,
+      int elapsedMs,
+      int activeAtStart,
+    )?
+    onMetrics,
   }) async {
     // 1. Strict 1 KB alignment rule validation
     if (offset < 0) {
@@ -237,50 +243,53 @@ void main() {
   });
 
   group('Task 8 — VideoRangeCacheManager', () {
-    test('Caches 1 MB chunks in app-private directory with .nomedia guard', () async {
-      final cacheDir = await cacheManager.getCacheDirectoryPath();
-      expect(File('$cacheDir/.nomedia').existsSync(), isTrue);
+    test(
+      'Caches 1 MB chunks in app-private directory with .nomedia guard',
+      () async {
+        final cacheDir = await cacheManager.getCacheDirectoryPath();
+        expect(File('$cacheDir/.nomedia').existsSync(), isTrue);
 
-      final mockService = MockTelegramRangeService(
-        totalFileSize: 10 * 1024 * 1024,
-      );
-      final file = createMockVideoFile(
-        messageId: 201,
-        sizeBytes: 10 * 1024 * 1024,
-      );
+        final mockService = MockTelegramRangeService(
+          totalFileSize: 10 * 1024 * 1024,
+        );
+        final file = createMockVideoFile(
+          messageId: 201,
+          sizeBytes: 10 * 1024 * 1024,
+        );
 
-      // Fetch Chunk 0 (first 1 MB)
-      final chunk0 = await cacheManager.getChunk(
-        file: file,
-        chunkIndex: 0,
-        mediaService: mockService,
-      );
-      expect(chunk0.length, 1024 * 1024);
-      expect(mockService.recordedRequests.length, 1);
+        // Fetch Chunk 0 (first 1 MB)
+        final chunk0 = await cacheManager.getChunk(
+          file: file,
+          chunkIndex: 0,
+          mediaService: mockService,
+        );
+        expect(chunk0.length, 1024 * 1024);
+        expect(mockService.recordedRequests.length, 1);
 
-      // Verify chunk file exists on disk
-      final chunkFile = await cacheManager.getChunkFile(
-        file.telegramMessageId,
-        0,
-      );
-      // Wait for async persistence to write
-      int attempts = 0;
-      while (!chunkFile.existsSync() && attempts < 20) {
-        await Future.delayed(const Duration(milliseconds: 20));
-        attempts++;
-      }
-      expect(chunkFile.existsSync(), isTrue);
-      expect(chunkFile.lengthSync(), 1024 * 1024);
+        // Verify chunk file exists on disk
+        final chunkFile = await cacheManager.getChunkFile(
+          file.telegramMessageId,
+          0,
+        );
+        // Wait for async persistence to write
+        int attempts = 0;
+        while (!chunkFile.existsSync() && attempts < 20) {
+          await Future.delayed(const Duration(milliseconds: 20));
+          attempts++;
+        }
+        expect(chunkFile.existsSync(), isTrue);
+        expect(chunkFile.lengthSync(), 1024 * 1024);
 
-      // Re-read Chunk 0: must read 100% from RAM/disk with 0 Telegram network calls
-      final cachedChunk0 = await cacheManager.getChunk(
-        file: file,
-        chunkIndex: 0,
-        mediaService: mockService,
-      );
-      expect(cachedChunk0, chunk0);
-      expect(mockService.recordedRequests.length, 1); // Still 1!
-    });
+        // Re-read Chunk 0: must read 100% from RAM/disk with 0 Telegram network calls
+        final cachedChunk0 = await cacheManager.getChunk(
+          file: file,
+          chunkIndex: 0,
+          mediaService: mockService,
+        );
+        expect(cachedChunk0, chunk0);
+        expect(mockService.recordedRequests.length, 1); // Still 1!
+      },
+    );
 
     test(
       'Deduplicates concurrent in-flight requests for the same chunk',
@@ -1017,39 +1026,48 @@ void main() {
       // Verified: both chunk 0 and tail chunk were preloaded
       expect(mock.recordedRequests.length, 2);
       expect(mock.recordedRequests.any((r) => r.offset == 0), isTrue);
-      expect(mock.recordedRequests.any((r) => r.offset > 100 * 1024 * 1024), isTrue);
+      expect(
+        mock.recordedRequests.any((r) => r.offset > 100 * 1024 * 1024),
+        isTrue,
+      );
 
       await preloadProxy.stop();
     });
 
-    test('Sliding-window prefetching fetches adjacent chunks into cache', () async {
-      final prefetchCacheManager = VideoRangeCacheManager(
-        customCacheDirPath: tempDir.path,
-        enablePrefetch: true,
-      );
-      final mock = MockTelegramRangeService(totalFileSize: testFileSize);
-      final prefetchProxy = VideoStreamingProxy(
-        mediaService: mock,
-        cacheManager: prefetchCacheManager,
-        enablePreload: false,
-      );
-      await prefetchProxy.ensureStarted();
+    test(
+      'Sliding-window prefetching fetches adjacent chunks into cache',
+      () async {
+        final prefetchCacheManager = VideoRangeCacheManager(
+          customCacheDirPath: tempDir.path,
+          enablePrefetch: true,
+        );
+        final mock = MockTelegramRangeService(totalFileSize: testFileSize);
+        final prefetchProxy = VideoStreamingProxy(
+          mediaService: mock,
+          cacheManager: prefetchCacheManager,
+          enablePreload: false,
+        );
+        await prefetchProxy.ensureStarted();
 
-      final file = createMockVideoFile(messageId: 509, sizeBytes: testFileSize);
-      final streamUrl = prefetchProxy.registerFile(file);
+        final file = createMockVideoFile(
+          messageId: 509,
+          sizeBytes: testFileSize,
+        );
+        final streamUrl = prefetchProxy.registerFile(file);
 
-      final req = await httpClient.getUrl(Uri.parse(streamUrl));
-      req.headers.set(HttpHeaders.rangeHeader, 'bytes=0-1023');
-      final res = await req.close();
-      await res.drain();
+        final req = await httpClient.getUrl(Uri.parse(streamUrl));
+        req.headers.set(HttpHeaders.rangeHeader, 'bytes=0-1023');
+        final res = await req.close();
+        await res.drain();
 
-      // Wait briefly for background prefetch workers to execute
-      await Future.delayed(const Duration(milliseconds: 100));
+        // Wait briefly for background prefetch workers to execute
+        await Future.delayed(const Duration(milliseconds: 100));
 
-      // Both Chunk 0 and prefetched subsequent chunks were requested from Telegram
-      expect(mock.recordedRequests.length, greaterThan(1));
+        // Both Chunk 0 and prefetched subsequent chunks were requested from Telegram
+        expect(mock.recordedRequests.length, greaterThan(1));
 
-      await prefetchProxy.stop();
-    });
+        await prefetchProxy.stop();
+      },
+    );
   });
 }

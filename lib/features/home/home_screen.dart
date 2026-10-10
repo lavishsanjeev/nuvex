@@ -47,37 +47,76 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
         statusBarIconBrightness: Brightness.dark,
-        systemNavigationBarColor: NuvexColors.white,
+        systemNavigationBarColor: Colors.transparent,
         systemNavigationBarIconBrightness: Brightness.dark,
       ),
       child: Scaffold(
         backgroundColor: NuvexColors.iceBackground,
-        body: IndexedStack(
-          index: _currentIndex,
+        body: Stack(
           children: [
-            PhotosScreen(
-              controller: widget.controller,
-              mediaController: _mediaController,
+            IndexedStack(
+              index: _currentIndex,
+              children: [
+                PhotosScreen(
+                  controller: widget.controller,
+                  mediaController: _mediaController,
+                ),
+                CollectionsScreen(
+                  controller: widget.controller,
+                  mediaController: _mediaController,
+                ),
+              ],
             ),
-            CollectionsScreen(
-              controller: widget.controller,
-              mediaController: _mediaController,
+            // Floating pill navigation bar above the bottom system navigation area
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: ListenableBuilder(
+                listenable: _mediaController,
+                builder: (context, _) {
+                  final isSelectionMode = _mediaController.isSelectionMode;
+                  return AnimatedSlide(
+                    duration: const Duration(milliseconds: 200),
+                    curve: Curves.easeInOut,
+                    offset: isSelectionMode
+                        ? const Offset(0, 1.5)
+                        : Offset.zero,
+                    child: AnimatedOpacity(
+                      duration: const Duration(milliseconds: 200),
+                      opacity: isSelectionMode ? 0.0 : 1.0,
+                      child: IgnorePointer(
+                        ignoring: isSelectionMode,
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                            bottom: bottomInset > 0 ? bottomInset + 8 : 16,
+                          ),
+                          child: Center(
+                            child: NuvexBottomBar(
+                              currentIndex: _currentIndex,
+                              onTap: (index) {
+                                if (_currentIndex != index) {
+                                  setState(() {
+                                    _currentIndex = index;
+                                  });
+                                }
+                              },
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
             ),
           ],
-        ),
-        bottomNavigationBar: NuvexBottomBar(
-          currentIndex: _currentIndex,
-          onTap: (index) {
-            if (_currentIndex != index) {
-              setState(() {
-                _currentIndex = index;
-              });
-            }
-          },
         ),
       ),
     );

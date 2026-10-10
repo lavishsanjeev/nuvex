@@ -148,6 +148,7 @@ class TelegramUploadResult {
   final int? durationMs;
   final String category;
   final int? randomId;
+  final String? sha256;
 
   const TelegramUploadResult({
     required this.messageId,
@@ -163,10 +164,15 @@ class TelegramUploadResult {
     this.durationMs,
     required this.category,
     this.randomId,
+    this.sha256,
   });
 
   /// Maps this upload result to a Nuvex [RemoteFile] record for database persistence.
-  RemoteFile toRemoteFile({String? localPath, String? thumbnailPath}) {
+  RemoteFile toRemoteFile({
+    String? localPath,
+    String? thumbnailPath,
+    String? sha256,
+  }) {
     return RemoteFile(
       id: messageId,
       telegramChatId: 0,
@@ -184,6 +190,7 @@ class TelegramUploadResult {
       width: width,
       height: height,
       durationMs: durationMs,
+      sha256: sha256 ?? this.sha256,
     );
   }
 }

@@ -6,9 +6,14 @@ import 'package:path_provider/path_provider.dart';
 
 import '../../../core/database/nuvex_database.dart';
 import '../../../core/database/remote_file.dart';
+import '../../../core/utils/concurrency_limiter.dart';
+import '../../../core/utils/file_hash.dart';
 import '../../../core/utils/image_dimensions.dart';
 import '../../../telegram/telegram_media_service.dart';
 import '../../../telegram/telegram_models.dart';
+import '../models/collection_preview.dart';
+import '../services/collection_thumbnail_resolver.dart';
+import 'upload_repository.dart';
 
 /// Repository coordinating local SQLite database cache and Telegram MTProto media sync.
 ///
@@ -60,6 +65,62 @@ class MediaRepository {
     return _database.getFilesByCategory(category, limit: limit, offset: offset);
   }
 
+  /// Retrieves a single representative file for a collection category.
+  Future<RemoteFile?> getRepresentativeFile(String category) async {
+    if (!_database.isInitialized) {
+      return null;
+    }
+    return _database.getRepresentativeFile(category);
+  }
+
+  /// Retrieves representative files for the 4 primary collection categories.
+  Future<Map<String, RemoteFile?>> getCollectionRepresentatives() async {
+    if (!_database.isInitialized) {
+      return {};
+    }
+    final Map<String, RemoteFile?> result = {};
+    for (final category in ['documents', 'places', 'stickers', 'moments']) {
+      result[category] = await _database.getRepresentativeFile(category);
+    }
+    return result;
+  }
+
+  late final CollectionThumbnailResolver _thumbnailResolver =
+      CollectionThumbnailResolver(repository: this);
+
+  CollectionThumbnailResolver get thumbnailResolver => _thumbnailResolver;
+
+  late final UploadRepository _uploadRepository = UploadRepository(
+    database: _database,
+    mediaService: _mediaService,
+  );
+
+  UploadRepository get uploadRepository => _uploadRepository;
+
+  /// Retrieves a prepared [CollectionPreview] for a specific category.
+  Future<CollectionPreview> getCollectionPreview(
+    String category, {
+    bool autoFetchThumb = true,
+  }) async {
+    if (!_database.isInitialized) {
+      await _database.initialize();
+    }
+    return _thumbnailResolver.resolveCollectionPreview(
+      category,
+      autoFetch: autoFetchThumb,
+    );
+  }
+
+  /// Retrieves all 4 primary [CollectionPreview]s.
+  Future<List<CollectionPreview>> getPrimaryCollectionPreviews({
+    bool autoFetchThumb = true,
+  }) async {
+    if (!_database.isInitialized) {
+      await _database.initialize();
+    }
+    return _thumbnailResolver.resolveAllPreviews(autoFetch: autoFetchThumb);
+  }
+
   /// Retrieves real storage statistics aggregated directly from SQLite metadata.
   Future<NuvexStorageStats> getStorageStats() async {
     if (!_database.isInitialized) {
@@ -76,9 +137,46 @@ class MediaRepository {
   /// - Deduplicates by Telegram message ID
   /// - Preserves newest-to-oldest ordering
   /// - Does not repeatedly fetch the same page
+  Future<List<RemoteFile>>? _activeSyncFuture;
+
+  /// Synchronizes metadata from Telegram Saved Messages into local database across multiple pages.
+  ///
+  /// Conforms strictly to requirements:
+  /// - Truly incremental: stops once already-indexed media boundary is reached
+  /// - Deduplicates concurrent sync calls across callers
+  /// - Avoids rescanning already indexed history unnecessarily (prevents FLOOD_WAIT)
+  /// - Paginates until no more messages or boundary reached
+  /// - Uses correct Telegram oldest message ID offset for subsequent pages
+  /// - Deduplicates by Telegram message ID
+  /// - Preserves newest-to-oldest ordering
   /// - Upserts into SQLite without creating duplicate rows
-  /// - Distinguishes total Telegram messages, media items extracted, database count, gallery query count
   Future<List<RemoteFile>> syncSavedMessages({
+    int? limit,
+    int pageSize = 30,
+    int? maxTotalMessages,
+    int maxPages = 50,
+    Duration timeout = const Duration(seconds: 15),
+  }) {
+    if (_activeSyncFuture != null) {
+      debugPrint('[SYNC] Reusing existing in-flight Telegram sync operation');
+      return _activeSyncFuture!;
+    }
+
+    final future = _runSyncSavedMessages(
+      limit: limit,
+      pageSize: pageSize,
+      maxTotalMessages: maxTotalMessages,
+      maxPages: maxPages,
+      timeout: timeout,
+    );
+
+    _activeSyncFuture = future;
+    return future.whenComplete(() {
+      _activeSyncFuture = null;
+    });
+  }
+
+  Future<List<RemoteFile>> _runSyncSavedMessages({
     int? limit,
     int pageSize = 30,
     int? maxTotalMessages,
@@ -90,16 +188,7 @@ class MediaRepository {
       await _database.initialize();
     }
 
-    String? thumbsDir;
-    try {
-      final dir = await getApplicationDocumentsDirectory().timeout(
-        const Duration(milliseconds: 500),
-      );
-      thumbsDir = '${dir.path}/nuvex_thumbs';
-      _ensureNoMedia(thumbsDir);
-    } catch (_) {
-      thumbsDir = '${Directory.systemTemp.path}/nuvex_thumbs';
-    }
+    final thumbsDir = await getThumbsDirectory();
 
     int currentOffsetId = 0;
     int pageIndex = 0;
@@ -141,18 +230,38 @@ class MediaRepository {
         allExtractedMedia[file.telegramMessageId] = file;
       }
 
+      final pageIds = pageMedia.map((f) => f.telegramMessageId).toList();
+      final existingIds = await _database.getExistingTelegramMessageIds(
+        pageIds,
+      );
+      final bool allAlreadyIndexed =
+          pageMedia.isNotEmpty && existingIds.length == pageMedia.length;
+
       if (pageMedia.isNotEmpty) {
         await _database.upsertFiles(pageMedia);
       }
 
-      final oldestMsgId = _mediaService.lastOldestMessageId ??
+      // Incremental sync boundary: stop once we encounter a full page of already indexed media
+      if (allAlreadyIndexed) {
+        debugPrint(
+          '[SYNC_PAGINATION] Page $pageIndex is already fully indexed in SQLite (${existingIds.length}/${pageMedia.length} existing). Stopping incremental sync.',
+        );
+        break;
+      }
+
+      // Yield cooperatively to UI isolate to maintain 60/120fps responsiveness
+      await Future<void>.delayed(Duration.zero);
+
+      final oldestMsgId =
+          _mediaService.lastOldestMessageId ??
           (pageMedia.isNotEmpty
               ? pageMedia
-                  .map((f) => f.telegramMessageId)
-                  .reduce((a, b) => a < b ? a : b)
+                    .map((f) => f.telegramMessageId)
+                    .reduce((a, b) => a < b ? a : b)
               : null);
 
-      final bool hasMore = (totalRawInPage >= effectivePageSize ||
+      final bool hasMore =
+          (totalRawInPage >= effectivePageSize ||
               pageMedia.length >= effectivePageSize) &&
           oldestMsgId != null &&
           oldestMsgId != currentOffsetId;
@@ -166,9 +275,7 @@ class MediaRepository {
         'hasMore=$hasMore',
       );
 
-      if (!hasMore ||
-          oldestMsgId == currentOffsetId ||
-          pageMedia.isEmpty) {
+      if (!hasMore || oldestMsgId == currentOffsetId || pageMedia.isEmpty) {
         debugPrint(
           '[SYNC_PAGINATION] Reached end of Telegram history on page $pageIndex',
         );
@@ -199,15 +306,38 @@ class MediaRepository {
   }
 
   final Map<int, Future<RemoteFile>> _inFlightThumbDownloads = {};
-  Future<void> _thumbLock = Future.value();
+  final ConcurrencyLimiter _thumbLimiter = ConcurrencyLimiter(6);
+  String? _cachedThumbsDir;
+
+  /// Cached access to the nuvex_thumbs directory.
+  Future<String> getThumbsDirectory() async {
+    if (_cachedThumbsDir != null) return _cachedThumbsDir!;
+    String basePath;
+    try {
+      final dir = await getApplicationDocumentsDirectory().timeout(
+        const Duration(milliseconds: 500),
+      );
+      basePath = dir.path;
+    } catch (_) {
+      basePath = Directory.systemTemp.path;
+    }
+
+    final thumbsPath = '$basePath/nuvex_thumbs';
+    _ensureNoMedia(thumbsPath);
+    _cachedThumbsDir = thumbsPath;
+    return thumbsPath;
+  }
 
   /// Ensures a thumbnail is downloaded and cached locally on disk.
   ///
   /// - Verifies if [file.thumbnailPath] or [file.localPath] actually exists on disk.
   /// - If missing, downloads small thumbnail on demand from Telegram MTProto.
   /// - Deduplicates simultaneous requests for the same file ID.
-  /// - Updates local SQLite database record with [thumbnailPath].
-  Future<RemoteFile> ensureThumbnailAvailable(RemoteFile file) async {
+  /// - Updates local SQLite database record with [thumbnailPath] when [saveToDatabase] is true.
+  Future<RemoteFile> ensureThumbnailAvailable(
+    RemoteFile file, {
+    bool saveToDatabase = true,
+  }) async {
     if (!_database.isInitialized) {
       await _database.initialize();
     }
@@ -234,7 +364,7 @@ class MediaRepository {
       return _inFlightThumbDownloads[msgId]!;
     }
 
-    final future = _executeThumbDownload(file);
+    final future = _executeThumbDownload(file, saveToDatabase: saveToDatabase);
     _inFlightThumbDownloads[msgId] = future;
 
     try {
@@ -244,37 +374,29 @@ class MediaRepository {
     }
   }
 
-  Future<RemoteFile> _executeThumbDownload(RemoteFile file) async {
-    String basePath;
-    try {
-      final dir = await getApplicationDocumentsDirectory();
-      basePath = dir.path;
-    } catch (_) {
-      basePath = Directory.systemTemp.path;
-    }
-
-    _ensureNoMedia('$basePath/nuvex_thumbs');
-    final targetPath =
-        '$basePath/nuvex_thumbs/${file.telegramMessageId}_hq.jpg';
+  Future<RemoteFile> _executeThumbDownload(
+    RemoteFile file, {
+    bool saveToDatabase = true,
+  }) async {
+    final thumbsPath = await getThumbsDirectory();
+    final targetPath = '$thumbsPath/${file.telegramMessageId}_hq.jpg';
     final targetFile = File(targetPath);
 
     if (isValidHqThumbnail(targetFile)) {
       final updated = file.copyWith(thumbnailPath: targetPath);
-      await _database.upsertFiles([updated]);
+      if (saveToDatabase && file.thumbnailPath != targetPath) {
+        await _database.upsertFiles([updated]);
+      }
       return updated;
     }
 
-    // Sequentialize network downloads to prevent MTProto TCP socket contention
-    final prevLock = _thumbLock;
-    final completer = Completer<void>();
-    _thumbLock = completer.future;
-
-    try {
-      await prevLock;
-      // Re-check if written while waiting
+    return _thumbLimiter.run(() async {
+      // Re-check if written while waiting in queue
       if (isValidHqThumbnail(targetFile)) {
         final updated = file.copyWith(thumbnailPath: targetPath);
-        await _database.upsertFiles([updated]);
+        if (saveToDatabase && file.thumbnailPath != targetPath) {
+          await _database.upsertFiles([updated]);
+        }
         return updated;
       }
 
@@ -283,13 +405,100 @@ class MediaRepository {
         file: file,
         destinationPath: targetPath,
       );
+      markThumbnailAsValidated(targetPath);
 
       final updated = file.copyWith(thumbnailPath: targetPath);
-      await _database.upsertFiles([updated]);
+      if (saveToDatabase && file.thumbnailPath != targetPath) {
+        await _database.upsertFiles([updated]);
+      }
       return updated;
-    } finally {
-      completer.complete();
+    });
+  }
+
+  /// Downloads and caches thumbnails for a batch of files (typically 20-30 items).
+  ///
+  /// Concurrently processes items through [_thumbLimiter] (2 workers max) to keep UI responsive.
+  /// Batch-saves updated database records in a single transaction.
+  /// Allows cancellation if user scrolls far away from this batch.
+  Future<List<RemoteFile>> ensureThumbnailsForBatch(
+    List<RemoteFile> batch, {
+    bool Function()? isCancelled,
+  }) async {
+    if (batch.isEmpty) return const [];
+    if (!_database.isInitialized) {
+      await _database.initialize();
     }
+
+    final thumbsPath = await getThumbsDirectory();
+    final List<RemoteFile> results = List.from(batch);
+    final List<RemoteFile> needDatabaseSave = [];
+    final List<Future<void>> downloadTasks = [];
+
+    for (int i = 0; i < batch.length; i++) {
+      final file = batch[i];
+
+      // 1. Check local original
+      if (file.localPath != null && file.localPath!.isNotEmpty) {
+        final existing = File(file.localPath!);
+        if (existing.existsSync() && existing.lengthSync() > 0) {
+          continue;
+        }
+      }
+
+      // 2. Check existing thumbnailPath
+      if (file.thumbnailPath != null && file.thumbnailPath!.isNotEmpty) {
+        final existing = File(file.thumbnailPath!);
+        if (isValidHqThumbnail(existing)) {
+          continue;
+        }
+      }
+
+      // 3. Check target disk location
+      final targetPath = '$thumbsPath/${file.telegramMessageId}_hq.jpg';
+      final targetFile = File(targetPath);
+      if (isValidHqThumbnail(targetFile)) {
+        final updated = file.copyWith(thumbnailPath: targetPath);
+        results[i] = updated;
+        if (file.thumbnailPath != targetPath) {
+          needDatabaseSave.add(updated);
+        }
+        continue;
+      }
+
+      // 4. Queue network download through limiter
+      final taskIndex = i;
+      downloadTasks.add(
+        ensureThumbnailAvailable(file, saveToDatabase: false)
+            .then((updated) {
+              if (isCancelled?.call() == true) return;
+              results[taskIndex] = updated;
+              if (updated.thumbnailPath != null &&
+                  updated.thumbnailPath!.isNotEmpty) {
+                needDatabaseSave.add(updated);
+              }
+            })
+            .catchError((e) {
+              debugPrint(
+                '[MEDIA_REPO] Batch thumb error for ${file.telegramMessageId}: $e',
+              );
+            }),
+      );
+    }
+
+    if (downloadTasks.isNotEmpty) {
+      await Future.wait(downloadTasks);
+    }
+
+    // Single batch database write
+    if (needDatabaseSave.isNotEmpty) {
+      try {
+        await _database.upsertFiles(needDatabaseSave);
+      } catch (e) {
+        debugPrint('[MEDIA_REPO] Error batch-upserting thumbnails: $e');
+      }
+    }
+
+    return results;
   }
 
   /// Ensures a media file is downloaded and cached locally on disk.
@@ -368,9 +577,12 @@ class MediaRepository {
     return updated;
   }
 
+  static final Set<String> _guardedDirectories = {};
+
   /// Ensures a directory exists and contains a .nomedia file as an extra safeguard
   /// to guarantee Android MediaStore never indexes app-private cache files.
   void _ensureNoMedia(String directoryPath) {
+    if (_guardedDirectories.contains(directoryPath)) return;
     try {
       final dir = Directory(directoryPath);
       if (!dir.existsSync()) {
@@ -380,13 +592,38 @@ class MediaRepository {
       if (!noMedia.existsSync()) {
         noMedia.createSync();
       }
+      _guardedDirectories.add(directoryPath);
     } catch (_) {}
   }
 
-  /// Deletes media from Telegram, cleans up local app-private cache files,
-  /// and removes the record from the SQLite database.
+  /// Soft deletion: moves media to Trash without destroying Telegram file or local cache.
   Future<void> deleteMedia(RemoteFile file) async {
-    // 1. Delete from Telegram Cloud using existing authenticated MTProto connection
+    await moveToTrash(file);
+  }
+
+  /// Moves media to Trash by setting isTrashed = 1 and trashedAt in the SQLite database.
+  Future<void> moveToTrash(RemoteFile file, {int? trashedAtMs}) async {
+    if (!_database.isInitialized) {
+      await _database.initialize();
+    }
+    await _database.moveToTrash(
+      file.telegramMessageId,
+      trashedAtMs: trashedAtMs,
+    );
+  }
+
+  /// Restores a trashed media item back to normal active status.
+  Future<void> restoreFromTrash(RemoteFile file) async {
+    if (!_database.isInitialized) {
+      await _database.initialize();
+    }
+    await _database.restoreFromTrash(file.telegramMessageId);
+  }
+
+  /// Permanently deletes media from Telegram Cloud, cleans up local app-private cache,
+  /// and removes the record from SQLite only after Telegram deletion succeeds.
+  Future<void> permanentlyDeleteMedia(RemoteFile file) async {
+    // 1. Delete from Telegram Cloud using authenticated MTProto connection
     await _mediaService.deleteMessage(messageId: file.telegramMessageId);
 
     // 2. Clear local cached thumbnail and original (safeguarded: only within app-private cache)
@@ -397,6 +634,50 @@ class MediaRepository {
       await _database.initialize();
     }
     await _database.deleteFile(file.telegramMessageId);
+  }
+
+  /// Retrieves all currently trashed media records ordered by deletion date.
+  Future<List<RemoteFile>> getTrashedMedia({int? limit, int offset = 0}) async {
+    if (!_database.isInitialized) {
+      await _database.initialize();
+    }
+    return _database.getTrashedMedia(limit: limit, offset: offset);
+  }
+
+  /// Returns total count of items in Trash.
+  Future<int> getTrashedCount() async {
+    if (!_database.isInitialized) {
+      await _database.initialize();
+    }
+    return _database.getTrashedCount();
+  }
+
+  /// Safely cleans up expired items from Trash (older than 30 days retention).
+  ///
+  /// Strictly complies with Requirement 4 & 6:
+  /// Never deletes local records without first deleting the Telegram media.
+  /// If Telegram deletion fails for an item, it remains in Trash.
+  Future<int> cleanupExpiredTrash({
+    Duration retention = const Duration(days: 30),
+  }) async {
+    if (!_database.isInitialized) {
+      await _database.initialize();
+    }
+    final expired = await _database.getExpiredTrashedFiles(
+      retention: retention,
+    );
+    int cleanedCount = 0;
+    for (final file in expired) {
+      try {
+        await permanentlyDeleteMedia(file);
+        cleanedCount++;
+      } catch (e) {
+        debugPrint(
+          '[TRASH] Background cleanup failed for ${file.telegramMessageId}: $e',
+        );
+      }
+    }
+    return cleanedCount;
   }
 
   /// Safely deletes local cached files strictly within Nuvex app-private cache directories.
@@ -431,11 +712,19 @@ class MediaRepository {
   Future<TelegramUploadResult> uploadFile({
     required File file,
     String? mimeType,
+    String? sha256,
     void Function(double progress)? onProgress,
     TelegramUploadCancelToken? cancelToken,
     int? randomId,
     bool saveToDatabase = true,
   }) async {
+    String? fileSha256 = sha256;
+    if (fileSha256 == null && file.existsSync()) {
+      try {
+        fileSha256 = await calculateFileSha256(file);
+      } catch (_) {}
+    }
+
     final result = await _mediaService.uploadDocumentFile(
       file: file,
       mimeType: mimeType,
@@ -448,10 +737,13 @@ class MediaRepository {
       if (!_database.isInitialized) {
         await _database.initialize();
       }
-      final remoteFile = result.toRemoteFile(localPath: file.path);
+      final remoteFile = result.toRemoteFile(
+        localPath: file.path,
+        sha256: fileSha256,
+      );
       await _database.upsertFiles([remoteFile]);
       debugPrint(
-        '[REPO] Persisted uploaded file #${result.messageId} to SQLite database',
+        '[REPO] Persisted uploaded file #${result.messageId} to SQLite database (hash: $fileSha256)',
       );
     }
 

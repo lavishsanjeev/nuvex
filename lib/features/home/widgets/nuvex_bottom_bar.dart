@@ -2,13 +2,14 @@ import 'package:flutter/material.dart';
 
 import '../../../app/theme.dart';
 
-/// Minimal, high-polish bottom navigation bar for Nuvex.
+/// Floating pill-shaped navigation bar for Nuvex.
 ///
-/// Strictly displays EXACTLY TWO destinations:
-/// 1. Photos
-/// 2. Collections
-///
-/// No Create button, no Search/Magic button, and no extra tabs.
+/// Features:
+/// - Rounded, pill-shaped dark surface floating above the bottom system navigation area
+/// - Strictly displays exactly two destinations: Photos and Collections
+/// - Selected tab highlighted with a subtle lighter pill
+/// - Clean icons, balanced spacing, and smooth selection transitions
+/// - Allows the photo grid to scroll behind and around it
 class NuvexBottomBar extends StatelessWidget {
   final int currentIndex;
   final ValueChanged<int> onTap;
@@ -22,51 +23,61 @@ class NuvexBottomBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: const BoxDecoration(
-        color: NuvexColors.white,
-        border: Border(top: BorderSide(color: Color(0xFFE5E9F0), width: 1)),
-      ),
-      child: SafeArea(
-        top: false,
-        child: SizedBox(
-          height: 64,
-          child: Row(
-            children: [
-              Expanded(
-                child: _BottomNavItem(
-                  icon: currentIndex == 0
-                      ? Icons.photo_library_rounded
-                      : Icons.photo_library_outlined,
-                  label: 'Photos',
-                  isSelected: currentIndex == 0,
-                  onTap: () => onTap(0),
-                ),
-              ),
-              Expanded(
-                child: _BottomNavItem(
-                  icon: currentIndex == 1
-                      ? Icons.grid_view_rounded
-                      : Icons.grid_view_outlined,
-                  label: 'Collections',
-                  isSelected: currentIndex == 1,
-                  onTap: () => onTap(1),
-                ),
-              ),
-            ],
-          ),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E232E), // Sleek, dark pill surface
+        borderRadius: BorderRadius.circular(NuvexSpacing.radiusFull),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.12),
+          width: 1,
         ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.22),
+            blurRadius: 18,
+            spreadRadius: 1,
+            offset: const Offset(0, 6),
+          ),
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.08),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _FloatingNavItem(
+            icon: currentIndex == 0
+                ? Icons.photo_library_rounded
+                : Icons.photo_library_outlined,
+            label: 'Photos',
+            isSelected: currentIndex == 0,
+            onTap: () => onTap(0),
+          ),
+          const SizedBox(width: 4),
+          _FloatingNavItem(
+            icon: currentIndex == 1
+                ? Icons.grid_view_rounded
+                : Icons.grid_view_outlined,
+            label: 'Collections',
+            isSelected: currentIndex == 1,
+            onTap: () => onTap(1),
+          ),
+        ],
       ),
     );
   }
 }
 
-class _BottomNavItem extends StatelessWidget {
+class _FloatingNavItem extends StatelessWidget {
   final IconData icon;
   final String label;
   final bool isSelected;
   final VoidCallback onTap;
 
-  const _BottomNavItem({
+  const _FloatingNavItem({
     required this.icon,
     required this.label,
     required this.isSelected,
@@ -75,20 +86,21 @@ class _BottomNavItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final activeColor = NuvexColors.primaryBlue;
-    final inactiveColor = NuvexColors.mutedText;
-
-    return InkWell(
-      onTap: onTap,
-      splashColor: activeColor.withAlpha(20),
-      highlightColor: Colors.transparent,
-      child: Center(
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(NuvexSpacing.radiusFull),
+        splashColor: Colors.white.withValues(alpha: 0.15),
+        highlightColor: Colors.transparent,
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
+          duration: const Duration(milliseconds: 220),
           curve: Curves.easeInOut,
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
           decoration: BoxDecoration(
-            color: isSelected ? const Color(0xFFEFF6FF) : Colors.transparent,
+            color: isSelected
+                ? const Color(0xFF333C4D) // Subtle lighter pill highlight
+                : Colors.transparent,
             borderRadius: BorderRadius.circular(NuvexSpacing.radiusFull),
           ),
           child: Row(
@@ -96,8 +108,8 @@ class _BottomNavItem extends StatelessWidget {
             children: [
               Icon(
                 icon,
-                size: 22,
-                color: isSelected ? activeColor : inactiveColor,
+                size: 20,
+                color: isSelected ? Colors.white : const Color(0xFF94A3B8),
               ),
               const SizedBox(width: 8),
               Text(
@@ -106,7 +118,7 @@ class _BottomNavItem extends StatelessWidget {
                   fontFamily: NuvexTypography.primaryFamily,
                   fontSize: 14,
                   fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
-                  color: isSelected ? activeColor : inactiveColor,
+                  color: isSelected ? Colors.white : const Color(0xFF94A3B8),
                   letterSpacing: -0.2,
                 ),
               ),

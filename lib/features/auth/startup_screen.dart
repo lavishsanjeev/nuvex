@@ -3,12 +3,13 @@ import 'package:flutter/material.dart';
 import '../../app/router.dart';
 import '../../app/theme.dart';
 import '../../core/services/native_media_service.dart';
+import '../home/home_screen.dart';
 import 'controllers/auth_controller.dart';
 
-/// Minimal, branded startup screen for Nuvex.
+/// Clean startup router for Nuvex.
 ///
-/// Ensures authenticated users never see onboarding/Getting Started,
-/// and prevents double navigation or UI flicker on cold launch.
+/// Ensures authenticated users launch directly into Photos without seeing a Nuvex
+/// loading screen or spinner. If unauthenticated, smoothly routes to Getting Started.
 class StartupScreen extends StatefulWidget {
   final AuthController? controller;
 
@@ -31,9 +32,10 @@ class _StartupScreenState extends State<StartupScreen> {
   }
 
   Future<void> _checkSession() async {
-    // Purge any unwanted legacy files in public folders on startup
     NativeMediaService.cleanupUnwantedGalleryFiles();
-    await _authController.initialize();
+    if (!_authController.isInitialized) {
+      await _authController.initialize();
+    }
     if (!mounted) return;
 
     if (_authController.isAuthenticated) {
@@ -49,56 +51,13 @@ class _StartupScreenState extends State<StartupScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    if (_authController.isAuthenticated) {
+      return HomeScreen(controller: _authController);
+    }
+    // Clean neutral scaffold with zero spinners or loading screens
+    return const Scaffold(
       backgroundColor: NuvexColors.white,
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            // Branded Nuvex Logo
-            RichText(
-              text: const TextSpan(
-                style: TextStyle(
-                  fontFamily: NuvexTypography.primaryFamily,
-                  fontSize: 36,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: -1.0,
-                ),
-                children: [
-                  TextSpan(
-                    text: 'Nu',
-                    style: TextStyle(color: NuvexColors.darkNavy),
-                  ),
-                  TextSpan(
-                    text: 'vex',
-                    style: TextStyle(color: NuvexColors.primaryBlue),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              'Your files, your space.',
-              style: TextStyle(
-                fontFamily: NuvexTypography.primaryFamily,
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-                color: NuvexColors.secondaryText,
-                letterSpacing: -0.2,
-              ),
-            ),
-            const SizedBox(height: 36),
-            const SizedBox(
-              width: 24,
-              height: 24,
-              child: CircularProgressIndicator(
-                strokeWidth: 2.5,
-                color: NuvexColors.primaryBlue,
-              ),
-            ),
-          ],
-        ),
-      ),
+      body: SizedBox.shrink(),
     );
   }
 }

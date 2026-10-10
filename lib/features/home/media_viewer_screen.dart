@@ -50,12 +50,15 @@ class MediaViewerScreen extends StatefulWidget {
           category: 'photos',
         );
 
+  final bool isTrashMode;
+
   MediaViewerScreen({
     super.key,
     List<RemoteFile>? files,
     RemoteFile? file,
     int initialIndex = 0,
     required this.controller,
+    this.isTrashMode = false,
   }) : files = files ?? (file != null ? [file] : const []),
        initialIndex = file != null && (files == null || files.isEmpty)
            ? 0
@@ -67,6 +70,7 @@ class MediaViewerScreen extends StatefulWidget {
     required List<RemoteFile> files,
     int initialIndex = 0,
     required MediaController controller,
+    bool isTrashMode = false,
   }) {
     return PageRouteBuilder(
       opaque: false,
@@ -75,6 +79,7 @@ class MediaViewerScreen extends StatefulWidget {
             files: files,
             initialIndex: initialIndex,
             controller: controller,
+            isTrashMode: isTrashMode,
           ),
       transitionsBuilder: (context, animation, secondaryAnimation, child) {
         return FadeTransition(opacity: animation, child: child);
@@ -93,9 +98,19 @@ class _MediaViewerScreenState extends State<MediaViewerScreen>
   late List<RemoteFile> _files;
   bool _isCurrentItemZoomed = false;
   bool _showControls = true;
+
+  bool get _isCurrentFileTrashed =>
+      widget.isTrashMode ||
+      (_files.isNotEmpty &&
+          _currentIndex < _files.length &&
+          _currentFile.isTrashed);
   bool _isSharing = false;
   bool _isSaving = false;
   bool _isDeleting = false;
+
+  // Video controls auto-hide & scrubbing state
+  bool _isScrubbing = false;
+  Timer? _autoHideTimer;
 
   // Swipe-down to dismiss gesture state
   double _dragOffsetY = 0.0;
@@ -110,6 +125,59 @@ class _MediaViewerScreenState extends State<MediaViewerScreen>
   int get currentIndex => _currentIndex;
   RemoteFile get currentFile => _currentFile;
 
+  bool _isCurrentFileVideo() {
+    final file = _currentFile;
+    return file.category == 'videos' ||
+        file.mimeType.toLowerCase().startsWith('video/');
+  }
+
+  void _startAutoHideTimer() {
+    _autoHideTimer?.cancel();
+    if (!_isCurrentFileVideo()) return;
+    _autoHideTimer = Timer(const Duration(milliseconds: 2800), () {
+      if (!mounted || _isScrubbing || !_isCurrentFileVideo()) return;
+      setState(() {
+        _showControls = false;
+      });
+    });
+  }
+
+  void _cancelAutoHideTimer() {
+    _autoHideTimer?.cancel();
+    _autoHideTimer = null;
+  }
+
+  void _resetAutoHideTimer() {
+    if (_showControls && _isCurrentFileVideo() && !_isScrubbing) {
+      _startAutoHideTimer();
+    }
+  }
+
+  void _toggleControls() {
+    if (_isCurrentItemZoomed) return;
+    setState(() {
+      _showControls = !_showControls;
+    });
+    if (_isCurrentFileVideo()) {
+      if (_showControls) {
+        _startAutoHideTimer();
+      } else {
+        _cancelAutoHideTimer();
+      }
+    }
+  }
+
+  void _handleScrubbingChanged(bool isScrubbing) {
+    _isScrubbing = isScrubbing;
+    if (isScrubbing) {
+      _cancelAutoHideTimer();
+    } else {
+      if (_showControls && _isCurrentFileVideo()) {
+        _startAutoHideTimer();
+      }
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -120,6 +188,9 @@ class _MediaViewerScreenState extends State<MediaViewerScreen>
     );
     _pageController = PageController(initialPage: _currentIndex);
     _preloadAdjacent(_currentIndex);
+
+    // Initial controls visibility: always true so Back button is immediately interactive
+    _showControls = true;
 
     _resetAnimationController =
         AnimationController(
@@ -147,6 +218,7 @@ class _MediaViewerScreenState extends State<MediaViewerScreen>
 
   @override
   void dispose() {
+    _cancelAutoHideTimer();
     _pageController.dispose();
     _resetAnimationController.dispose();
     super.dispose();
@@ -213,6 +285,7 @@ class _MediaViewerScreenState extends State<MediaViewerScreen>
     if (_isDeleting || _files.isEmpty) return;
     final file = _currentFile;
 
+    _cancelAutoHideTimer();
     final shouldDelete = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -241,7 +314,7 @@ class _MediaViewerScreenState extends State<MediaViewerScreen>
           ],
         ),
         content: const Text(
-          'Are you sure you want to delete this media? This will permanently remove it from Telegram and your device.',
+          'Move this media to Recently Deleted? It will be kept for 30 days before permanent deletion.',
           style: TextStyle(
             fontFamily: NuvexTypography.primaryFamily,
             fontSize: 14,
@@ -284,6 +357,8 @@ class _MediaViewerScreenState extends State<MediaViewerScreen>
 
     if (shouldDelete == true) {
       await _handleDelete(file);
+    } else if (mounted && _showControls && _isCurrentFileVideo()) {
+      _startAutoHideTimer();
     }
   }
 
@@ -324,7 +399,7 @@ class _MediaViewerScreenState extends State<MediaViewerScreen>
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Media deleted from Telegram'),
+          content: Text('Moved to Recently Deleted'),
           duration: Duration(seconds: 2),
           backgroundColor: Color(0xFF1E293B),
         ),
@@ -342,6 +417,205 @@ class _MediaViewerScreenState extends State<MediaViewerScreen>
             label: 'Retry',
             textColor: Colors.white,
             onPressed: () => _handleDelete(file),
+          ),
+        ),
+      );
+    }
+  }
+
+  // ── Restore Handler (Trash) ──
+  Future<void> _handleRestore(RemoteFile file) async {
+    if (_isDeleting || _files.isEmpty) return;
+    setState(() => _isDeleting = true);
+
+    try {
+      await widget.controller.restoreFromTrash(file);
+
+      if (!mounted) return;
+
+      final targetIndex = _files.indexWhere(
+        (f) => f.telegramMessageId == file.telegramMessageId,
+      );
+
+      setState(() {
+        if (targetIndex != -1) {
+          _files.removeAt(targetIndex);
+        }
+        _isDeleting = false;
+        _isCurrentItemZoomed = false;
+
+        if (_files.isEmpty) {
+          Navigator.of(context).pop();
+          return;
+        }
+
+        if (_currentIndex >= _files.length) {
+          _currentIndex = _files.length - 1;
+        }
+      });
+
+      if (_files.isNotEmpty) {
+        _pageController.jumpToPage(_currentIndex);
+        _preloadAdjacent(_currentIndex);
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Item restored to Photos'),
+          duration: Duration(seconds: 2),
+          backgroundColor: Color(0xFF1E293B),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isDeleting = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Restore failed: ${e.toString().replaceAll('Exception: ', '')}',
+          ),
+          backgroundColor: NuvexColors.errorRed,
+        ),
+      );
+    }
+  }
+
+  // ── Permanent Delete Handler (Trash) ──
+  Future<void> _confirmPermanentDelete(RemoteFile file) async {
+    if (_isDeleting || _files.isEmpty) return;
+    _cancelAutoHideTimer();
+
+    final shouldDelete = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF18181B),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: const BorderSide(color: Colors.white12),
+        ),
+        title: const Row(
+          children: [
+            Icon(
+              Icons.delete_forever_rounded,
+              color: Colors.redAccent,
+              size: 24,
+            ),
+            SizedBox(width: 10),
+            Text(
+              'Delete Permanently?',
+              style: TextStyle(
+                fontFamily: NuvexTypography.primaryFamily,
+                fontWeight: FontWeight.w700,
+                fontSize: 18,
+                color: Colors.white,
+              ),
+            ),
+          ],
+        ),
+        content: const Text(
+          'This media will be permanently deleted from Telegram and your device. This action cannot be undone.',
+          style: TextStyle(
+            fontFamily: NuvexTypography.primaryFamily,
+            fontSize: 14,
+            color: Colors.white70,
+            height: 1.4,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text(
+              'Cancel',
+              style: TextStyle(
+                fontFamily: NuvexTypography.primaryFamily,
+                color: Colors.white60,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.redAccent,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text(
+              'Delete Permanently',
+              style: TextStyle(
+                fontFamily: NuvexTypography.primaryFamily,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldDelete == true) {
+      await _handlePermanentDelete(file);
+    } else if (mounted && _showControls && _isCurrentFileVideo()) {
+      _startAutoHideTimer();
+    }
+  }
+
+  Future<void> _handlePermanentDelete(RemoteFile file) async {
+    if (_isDeleting || _files.isEmpty) return;
+    setState(() => _isDeleting = true);
+
+    try {
+      await widget.controller.permanentlyDeleteMedia(file);
+
+      if (!mounted) return;
+
+      final targetIndex = _files.indexWhere(
+        (f) => f.telegramMessageId == file.telegramMessageId,
+      );
+
+      setState(() {
+        if (targetIndex != -1) {
+          _files.removeAt(targetIndex);
+        }
+        _isDeleting = false;
+        _isCurrentItemZoomed = false;
+
+        if (_files.isEmpty) {
+          Navigator.of(context).pop();
+          return;
+        }
+
+        if (_currentIndex >= _files.length) {
+          _currentIndex = _files.length - 1;
+        }
+      });
+
+      if (_files.isNotEmpty) {
+        _pageController.jumpToPage(_currentIndex);
+        _preloadAdjacent(_currentIndex);
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Media permanently deleted from Telegram'),
+          duration: Duration(seconds: 2),
+          backgroundColor: Color(0xFF1E293B),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isDeleting = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Permanent delete failed: ${e.toString().replaceAll('Exception: ', '')}',
+          ),
+          backgroundColor: NuvexColors.errorRed,
+          action: SnackBarAction(
+            label: 'Retry',
+            textColor: Colors.white,
+            onPressed: () => _handlePermanentDelete(file),
           ),
         ),
       );
@@ -512,9 +786,10 @@ class _MediaViewerScreenState extends State<MediaViewerScreen>
   }
 
   // ── Media Details Sheet ──
-  void _showDetailsSheet() {
+  void _showDetailsSheet() async {
+    _cancelAutoHideTimer();
     final file = _currentFile;
-    showModalBottomSheet(
+    await showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
@@ -626,6 +901,22 @@ class _MediaViewerScreenState extends State<MediaViewerScreen>
                       ? Colors.greenAccent
                       : NuvexColors.primaryBlue,
                 ),
+                if (file.isTrashed) ...[
+                  const Divider(color: Colors.white12, height: 16),
+                  _buildDetailRow(
+                    icon: Icons.auto_delete_outlined,
+                    label: 'Trash Status',
+                    value:
+                        '${file.daysRemainingInTrash} days until permanent delete',
+                    valueColor: Colors.amberAccent,
+                  ),
+                  if (file.trashedAt != null)
+                    _buildDetailRow(
+                      icon: Icons.calendar_today_outlined,
+                      label: 'Trashed On',
+                      value: _formatFullDateTime(file.trashedAt!),
+                    ),
+                ],
                 const SizedBox(height: 12),
               ],
             ),
@@ -633,6 +924,10 @@ class _MediaViewerScreenState extends State<MediaViewerScreen>
         );
       },
     );
+
+    if (mounted && _showControls && _isCurrentFileVideo()) {
+      _startAutoHideTimer();
+    }
   }
 
   Widget _buildDetailRow({
@@ -702,130 +997,173 @@ class _MediaViewerScreenState extends State<MediaViewerScreen>
     final double bgOpacity = (1.0 - (_dragOffsetY / 320)).clamp(0.0, 1.0);
     final double dragScale = (1.0 - (_dragOffsetY / 1600)).clamp(0.82, 1.0);
 
-    return Scaffold(
-      backgroundColor: Colors.black.withValues(alpha: bgOpacity),
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          // 1. Edge-to-Edge Media PageView with swipe-down to dismiss gesture
-          Positioned.fill(
-            child: _files.isEmpty
-                ? const SizedBox.shrink()
-                : GestureDetector(
-                    onVerticalDragStart: _isCurrentItemZoomed
-                        ? null
-                        : _handleVerticalDragStart,
-                    onVerticalDragUpdate: _isCurrentItemZoomed
-                        ? null
-                        : _handleVerticalDragUpdate,
-                    onVerticalDragEnd: _isCurrentItemZoomed
-                        ? null
-                        : _handleVerticalDragEnd,
-                    onVerticalDragCancel: _isCurrentItemZoomed
-                        ? null
-                        : _handleVerticalDragCancel,
-                    behavior: HitTestBehavior.translucent,
-                    child: Transform.translate(
-                      offset: Offset(0, _dragOffsetY),
-                      child: Transform.scale(
-                        scale: dragScale,
-                        alignment: Alignment.center,
-                        child: PageView.builder(
-                          controller: _pageController,
-                          physics: _isCurrentItemZoomed
-                              ? const NeverScrollableScrollPhysics()
-                              : const PageScrollPhysics(
-                                  parent: BouncingScrollPhysics(),
-                                ),
-                          itemCount: _files.length,
-                          onPageChanged: (index) {
-                            setState(() {
-                              _currentIndex = index;
-                              _isCurrentItemZoomed = false;
-                            });
-                            _preloadAdjacent(index);
-                          },
-                          itemBuilder: (context, index) {
-                            return _MediaPageItem(
-                              key: ValueKey(_files[index].telegramMessageId),
-                              file: _files[index],
-                              controller: widget.controller,
-                              isActive: index == _currentIndex,
-                              onZoomChanged: (zoomed) {
-                                if (index == _currentIndex &&
-                                    _isCurrentItemZoomed != zoomed) {
-                                  setState(() {
-                                    _isCurrentItemZoomed = zoomed;
-                                  });
-                                }
-                              },
-                              onToggleControls: () {
-                                if (!_isCurrentItemZoomed) {
-                                  setState(() {
-                                    _showControls = !_showControls;
-                                  });
-                                }
-                              },
-                              onFileUpdated: (updated) {
-                                if (mounted) {
-                                  setState(() {
-                                    _files[index] = updated;
-                                  });
-                                }
-                              },
-                            );
-                          },
+    return PopScope(
+      canPop: true,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) {
+          _cancelAutoHideTimer();
+          VideoPrefetchManager.instance.stop();
+        }
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black.withValues(alpha: bgOpacity),
+        body: Stack(
+          fit: StackFit.expand,
+          children: [
+            // 1. Edge-to-Edge Media PageView with swipe-down to dismiss gesture
+            Positioned.fill(
+              child: _files.isEmpty
+                  ? const SizedBox.shrink()
+                  : GestureDetector(
+                      onVerticalDragStart: _isCurrentItemZoomed
+                          ? null
+                          : _handleVerticalDragStart,
+                      onVerticalDragUpdate: _isCurrentItemZoomed
+                          ? null
+                          : _handleVerticalDragUpdate,
+                      onVerticalDragEnd: _isCurrentItemZoomed
+                          ? null
+                          : _handleVerticalDragEnd,
+                      onVerticalDragCancel: _isCurrentItemZoomed
+                          ? null
+                          : _handleVerticalDragCancel,
+                      behavior: HitTestBehavior.translucent,
+                      child: Transform.translate(
+                        offset: Offset(0, _dragOffsetY),
+                        child: Transform.scale(
+                          scale: dragScale,
+                          alignment: Alignment.center,
+                          child: PageView.builder(
+                            controller: _pageController,
+                            physics: _isCurrentItemZoomed
+                                ? const NeverScrollableScrollPhysics()
+                                : const PageScrollPhysics(
+                                    parent: BouncingScrollPhysics(),
+                                  ),
+                            itemCount: _files.length,
+                            onPageChanged: (index) {
+                              setState(() {
+                                _currentIndex = index;
+                                _isCurrentItemZoomed = false;
+                                _isScrubbing = false;
+                                _cancelAutoHideTimer();
+                                _showControls = true;
+                              });
+                              _preloadAdjacent(index);
+                            },
+                            itemBuilder: (context, index) {
+                              return _MediaPageItem(
+                                key: ValueKey(_files[index].telegramMessageId),
+                                file: _files[index],
+                                controller: widget.controller,
+                                isActive: index == _currentIndex,
+                                showControls: _showControls,
+                                onZoomChanged: (zoomed) {
+                                  if (index == _currentIndex &&
+                                      _isCurrentItemZoomed != zoomed) {
+                                    setState(() {
+                                      _isCurrentItemZoomed = zoomed;
+                                    });
+                                  }
+                                },
+                                onToggleControls: _toggleControls,
+                                onResetAutoHideTimer: _resetAutoHideTimer,
+                                onScrubbingChanged: _handleScrubbingChanged,
+                                onFileUpdated: (updated) {
+                                  if (mounted) {
+                                    setState(() {
+                                      _files[index] = updated;
+                                    });
+                                  }
+                                },
+                              );
+                            },
+                          ),
                         ),
                       ),
                     ),
-                  ),
-          ),
+            ),
 
-          // 2. Minimal Floating Top Overlay (Back button only)
-          _buildTopOverlay(bgOpacity),
+            // 2. Minimal Floating Top Overlay (Back button only)
+            _buildTopOverlay(bgOpacity),
 
-          // 3. Immersive Bottom Action Bar (Share, Save, Delete, Details)
-          _buildBottomActionBar(bgOpacity),
-        ],
+            // 3. Immersive Bottom Action Bar (Share, Save, Delete, Details)
+            _buildBottomActionBar(bgOpacity),
+          ],
+        ),
       ),
     );
   }
 
   Widget _buildTopOverlay(double bgOpacity) {
+    // Keep Back button fully visible and clickable during video loading, buffering, or error states
+    final bool isVisible =
+        !_isCurrentItemZoomed && (_showControls || _isCurrentFileVideo());
     return Positioned(
       top: 0,
       left: 0,
       right: 0,
       child: AnimatedOpacity(
-        opacity: (_showControls && !_isCurrentItemZoomed) ? bgOpacity : 0.0,
+        opacity: isVisible ? bgOpacity : 0.0,
         duration: const Duration(milliseconds: 200),
         child: IgnorePointer(
-          ignoring: !_showControls || _isCurrentItemZoomed || _dragOffsetY > 10,
-          child: Container(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  Colors.black.withValues(alpha: 0.75),
-                  Colors.black.withValues(alpha: 0.35),
-                  Colors.transparent,
-                ],
-                stops: const [0.0, 0.6, 1.0],
-              ),
-            ),
-            child: SafeArea(
-              bottom: false,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                child: Row(
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.arrow_back, color: Colors.white),
-                      tooltip: 'Back',
-                      onPressed: () => Navigator.of(context).pop(),
-                    ),
+          ignoring: !isVisible || _isCurrentItemZoomed || _dragOffsetY > 10,
+          child: Listener(
+            onPointerDown: (_) => _resetAutoHideTimer(),
+            child: Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.black.withValues(alpha: 0.75),
+                    Colors.black.withValues(alpha: 0.35),
+                    Colors.transparent,
                   ],
+                  stops: const [0.0, 0.6, 1.0],
+                ),
+              ),
+              child: SafeArea(
+                bottom: false,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  child: Row(
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.arrow_back, color: Colors.white),
+                        tooltip: 'Back',
+                        onPressed: () => Navigator.of(context).pop(),
+                      ),
+                      if (_isCurrentFileTrashed) ...[
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.redAccent.withValues(alpha: 0.25),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: Colors.redAccent.withValues(alpha: 0.5),
+                            ),
+                          ),
+                          child: Text(
+                            'Recently Deleted • ${_currentFile.daysRemainingInTrash}d left',
+                            style: const TextStyle(
+                              fontFamily: NuvexTypography.primaryFamily,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -845,53 +1183,109 @@ class _MediaViewerScreenState extends State<MediaViewerScreen>
         duration: const Duration(milliseconds: 200),
         child: IgnorePointer(
           ignoring: !_showControls || _isCurrentItemZoomed || _dragOffsetY > 10,
-          child: Container(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.bottomCenter,
-                end: Alignment.topCenter,
-                colors: [
-                  Colors.black.withValues(alpha: 0.85),
-                  Colors.black.withValues(alpha: 0.5),
-                  Colors.transparent,
-                ],
-                stops: const [0.0, 0.6, 1.0],
-              ),
-            ),
-            child: SafeArea(
-              top: false,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 8,
-                  vertical: 10,
+          child: Listener(
+            onPointerDown: (_) => _resetAutoHideTimer(),
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () {},
+              child: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.bottomCenter,
+                    end: Alignment.topCenter,
+                    colors: [
+                      Colors.black.withValues(alpha: 0.85),
+                      Colors.black.withValues(alpha: 0.5),
+                      Colors.transparent,
+                    ],
+                    stops: const [0.0, 0.6, 1.0],
+                  ),
                 ),
-                child: Row(
-                  children: [
-                    _buildActionButton(
-                      icon: _isSharing ? null : Icons.share_outlined,
-                      isLoading: _isSharing,
-                      label: 'Share',
-                      onTap: _isSharing ? null : _handleShare,
+                child: SafeArea(
+                  top: false,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 10,
                     ),
-                    _buildActionButton(
-                      icon: _isSaving ? null : Icons.file_download_outlined,
-                      isLoading: _isSaving,
-                      label: 'Save',
-                      onTap: _isSaving ? null : _handleSaveToDevice,
+                    child: Row(
+                      children: _isCurrentFileTrashed
+                          ? [
+                              _buildActionButton(
+                                icon: _isDeleting
+                                    ? null
+                                    : Icons.restore_from_trash_rounded,
+                                isLoading: _isDeleting,
+                                label: 'Restore',
+                                onTap: _isDeleting
+                                    ? null
+                                    : () {
+                                        _resetAutoHideTimer();
+                                        _handleRestore(_currentFile);
+                                      },
+                              ),
+                              _buildActionButton(
+                                icon: _isDeleting
+                                    ? null
+                                    : Icons.delete_forever_rounded,
+                                iconColor: Colors.redAccent,
+                                isLoading: _isDeleting,
+                                label: 'Delete Permanently',
+                                onTap: _isDeleting
+                                    ? null
+                                    : () {
+                                        _resetAutoHideTimer();
+                                        _confirmPermanentDelete(_currentFile);
+                                      },
+                              ),
+                              _buildActionButton(
+                                icon: Icons.info_outline,
+                                label: 'Details',
+                                onTap: _showDetailsSheet,
+                              ),
+                            ]
+                          : [
+                              _buildActionButton(
+                                icon: _isSharing ? null : Icons.share_outlined,
+                                isLoading: _isSharing,
+                                label: 'Share',
+                                onTap: _isSharing
+                                    ? null
+                                    : () {
+                                        _resetAutoHideTimer();
+                                        _handleShare();
+                                      },
+                              ),
+                              _buildActionButton(
+                                icon: _isSaving
+                                    ? null
+                                    : Icons.file_download_outlined,
+                                isLoading: _isSaving,
+                                label: 'Save',
+                                onTap: _isSaving
+                                    ? null
+                                    : () {
+                                        _resetAutoHideTimer();
+                                        _handleSaveToDevice();
+                                      },
+                              ),
+                              _buildActionButton(
+                                icon: _isDeleting
+                                    ? null
+                                    : Icons.delete_outline_rounded,
+                                iconColor: Colors.redAccent,
+                                isLoading: _isDeleting,
+                                label: 'Delete',
+                                onTap: _isDeleting ? null : _confirmDelete,
+                              ),
+                              _buildActionButton(
+                                icon: Icons.info_outline,
+                                label: 'Details',
+                                onTap: _showDetailsSheet,
+                              ),
+                            ],
                     ),
-                    _buildActionButton(
-                      icon: _isDeleting ? null : Icons.delete_outline_rounded,
-                      iconColor: Colors.redAccent,
-                      isLoading: _isDeleting,
-                      label: 'Delete',
-                      onTap: _isDeleting ? null : _confirmDelete,
-                    ),
-                    _buildActionButton(
-                      icon: Icons.info_outline,
-                      label: 'Details',
-                      onTap: _showDetailsSheet,
-                    ),
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -959,8 +1353,11 @@ class _MediaPageItem extends StatefulWidget {
   final RemoteFile file;
   final MediaController controller;
   final bool isActive;
+  final bool showControls;
   final ValueChanged<bool> onZoomChanged;
   final VoidCallback onToggleControls;
+  final VoidCallback onResetAutoHideTimer;
+  final ValueChanged<bool> onScrubbingChanged;
   final ValueChanged<RemoteFile> onFileUpdated;
 
   const _MediaPageItem({
@@ -968,8 +1365,11 @@ class _MediaPageItem extends StatefulWidget {
     required this.file,
     required this.controller,
     required this.isActive,
+    this.showControls = true,
     required this.onZoomChanged,
     required this.onToggleControls,
+    required this.onResetAutoHideTimer,
+    required this.onScrubbingChanged,
     required this.onFileUpdated,
   });
 
@@ -1034,6 +1434,45 @@ class _MediaPageItemState extends State<_MediaPageItem>
     return true;
   }
 
+  String? _getThumbnailPath() {
+    if (_currentFile.thumbnailPath != null) {
+      final file = File(_currentFile.thumbnailPath!);
+      if (file.existsSync() && file.lengthSync() > 0) {
+        return _currentFile.thumbnailPath;
+      }
+      final parent = file.parent.path;
+      final placeholder =
+          '$parent/${_currentFile.telegramMessageId}_placeholder.jpg';
+      final placeholderFile = File(placeholder);
+      if (placeholderFile.existsSync() && placeholderFile.lengthSync() > 0) {
+        return placeholder;
+      }
+    }
+    if (_currentFile.localPath != null) {
+      final local = File(_currentFile.localPath!);
+      if (local.existsSync() && local.lengthSync() > 0) {
+        return _currentFile.localPath;
+      }
+    }
+    return null;
+  }
+
+  Widget _buildVideoThumbnail() {
+    final thumbPath = _getThumbnailPath();
+    if (thumbPath != null) {
+      return Center(
+        child: Image.file(
+          File(thumbPath),
+          fit: BoxFit.contain,
+          width: double.infinity,
+          height: double.infinity,
+          errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
+        ),
+      );
+    }
+    return const SizedBox.shrink();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1055,6 +1494,16 @@ class _MediaPageItemState extends State<_MediaPageItem>
     if (widget.isActive) {
       _checkAndPrepareFile();
     }
+
+    if (_isVideo && _getThumbnailPath() == null) {
+      widget.controller.loadThumbnail(_currentFile).then((updated) {
+        if (mounted && updated.thumbnailPath != null) {
+          setState(() {
+            _currentFile = updated;
+          });
+        }
+      });
+    }
   }
 
   @override
@@ -1062,6 +1511,15 @@ class _MediaPageItemState extends State<_MediaPageItem>
     super.didUpdateWidget(oldWidget);
     if (widget.file != oldWidget.file) {
       _currentFile = widget.file;
+      if (_isVideo && _getThumbnailPath() == null) {
+        widget.controller.loadThumbnail(_currentFile).then((updated) {
+          if (mounted && updated.thumbnailPath != null) {
+            setState(() {
+              _currentFile = updated;
+            });
+          }
+        });
+      }
     }
 
     if (widget.isActive != oldWidget.isActive) {
@@ -1172,12 +1630,6 @@ class _MediaPageItemState extends State<_MediaPageItem>
       final streamUrl = proxy.registerFile(_currentFile);
       _activeStreamUrl = streamUrl;
 
-      // Proactively start aggressive read-ahead prefetch for this video session
-      VideoPrefetchManager.instance.start(
-        file: _currentFile,
-        mediaService: proxy.mediaService,
-      );
-
       final controller = VideoPlayerController.networkUrl(
         Uri.parse(streamUrl),
         videoPlayerOptions: VideoPlayerOptions(mixWithOthers: true),
@@ -1205,25 +1657,25 @@ class _MediaPageItemState extends State<_MediaPageItem>
         _isStreaming = false;
       });
 
+      // Start prefetching ahead now that controller initialization is complete
+      VideoPrefetchManager.instance.start(
+        file: _currentFile,
+        mediaService: proxy.mediaService,
+      );
+
       if (widget.isActive) {
         controller.play();
       }
     } catch (e, stack) {
-      debugPrint(
-        '[STREAM_ERROR] Video streaming failed: $e\n$stack. Falling back to full download...',
-      );
+      debugPrint('[STREAM_ERROR] Video streaming failed: $e\n$stack');
       if (!mounted) return;
-      _fallbackToFullDownload();
+      _cleanUpStream();
+      setState(() {
+        _isStreaming = false;
+        _isVideoInitialized = false;
+        _downloadError = e.toString().replaceAll('Exception: ', '');
+      });
     }
-  }
-
-  void _fallbackToFullDownload() {
-    _cleanUpStream();
-    setState(() {
-      _isStreaming = false;
-      _isVideoInitialized = false;
-    });
-    _startDownload();
   }
 
   void _cleanUpStream() {
@@ -1251,9 +1703,15 @@ class _MediaPageItemState extends State<_MediaPageItem>
 
     if (controller.value.hasError) {
       debugPrint(
-        '[STREAM_ERROR] Playback error: ${controller.value.errorDescription}. Falling back to full download...',
+        '[STREAM_ERROR] Playback error: ${controller.value.errorDescription}',
       );
-      _fallbackToFullDownload();
+      _cleanUpStream();
+      setState(() {
+        _isStreaming = false;
+        _isVideoInitialized = false;
+        _downloadError =
+            controller.value.errorDescription ?? 'Playback error encountered';
+      });
       return;
     }
 
@@ -1373,7 +1831,319 @@ class _MediaPageItemState extends State<_MediaPageItem>
 
   @override
   Widget build(BuildContext context) {
-    // 1. Actively downloading original state (fallback or photo download)
+    // ── 1. Video Player Presentation ──
+    if (_isVideo) {
+      final controller = _videoPlayerController;
+      final isReady = _isVideoInitialized && controller != null;
+
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          widget.onToggleControls();
+        },
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            // Instant Video Thumbnail (always visible as base layer)
+            _buildVideoThumbnail(),
+
+            // Active Video Player once initialized
+            if (isReady)
+              Center(
+                child: AspectRatio(
+                  aspectRatio: controller.value.aspectRatio > 0
+                      ? controller.value.aspectRatio
+                      : 16 / 9,
+                  child: VideoPlayer(controller),
+                ),
+              ),
+
+            // Video Center Overlay: Error, Download, Loading Spinner, or Play/Pause Button
+            if (_downloadError != null)
+              Center(
+                child: Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 36),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 22,
+                    vertical: 18,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.8),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: Colors.white12),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.error_outline_rounded,
+                        color: Colors.redAccent,
+                        size: 30,
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        _downloadError!,
+                        textAlign: TextAlign.center,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontFamily: NuvexTypography.primaryFamily,
+                          fontSize: 13,
+                          color: Colors.white70,
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          ElevatedButton.icon(
+                            onPressed: () {
+                              setState(() {
+                                _downloadError = null;
+                                _isVideoInitialized = false;
+                              });
+                              _checkAndPrepareFile();
+                            },
+                            icon: const Icon(Icons.refresh, size: 16),
+                            label: const Text('Retry'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: NuvexColors.primaryBlue,
+                              foregroundColor: Colors.white,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 8,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          TextButton(
+                            onPressed: () {
+                              setState(() {
+                                _downloadError = null;
+                                _isVideoInitialized = false;
+                              });
+                              _startDownload();
+                            },
+                            child: const Text(
+                              'Download',
+                              style: TextStyle(
+                                fontFamily: NuvexTypography.primaryFamily,
+                                color: Colors.white70,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              )
+            else if (_isDownloading)
+              Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.7),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          value: _downloadProgress > 0
+                              ? _downloadProgress
+                              : null,
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        _downloadProgress > 0
+                            ? 'Downloading (${(_downloadProgress * 100).toInt()}%)...'
+                            : 'Connecting...',
+                        style: const TextStyle(
+                          fontFamily: NuvexTypography.primaryFamily,
+                          fontSize: 12,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              )
+            else if (!isReady)
+              // Small subtle circular progress indicator over thumbnail while initializing
+              Center(
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.45),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const SizedBox(
+                    width: 26,
+                    height: 26,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.5,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              )
+            else
+              // Play/Pause / Buffering tap overlay scoped to ValueListenableBuilder
+              ValueListenableBuilder<VideoPlayerValue>(
+                valueListenable: controller,
+                builder: (context, val, _) {
+                  if (val.isBuffering) {
+                    return Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.45),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const SizedBox(
+                        width: 26,
+                        height: 26,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.5,
+                          color: Colors.white,
+                        ),
+                      ),
+                    );
+                  }
+                  return AnimatedOpacity(
+                    opacity: widget.showControls ? 1.0 : 0.0,
+                    duration: const Duration(milliseconds: 200),
+                    child: IgnorePointer(
+                      ignoring: !widget.showControls,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () {
+                          if (val.isPlaying) {
+                            controller.pause();
+                          } else {
+                            if (val.position >= val.duration) {
+                              controller.seekTo(Duration.zero);
+                            }
+                            controller.play();
+                          }
+                          widget.onResetAutoHideTimer();
+                        },
+                        child: Container(
+                          width: 68,
+                          height: 68,
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.55),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            val.isPlaying ? Icons.pause : Icons.play_arrow,
+                            color: Colors.white,
+                            size: 40,
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+
+            // Video Bottom Progress Bar & Time
+            if (isReady)
+              Positioned(
+                bottom: MediaQuery.of(context).padding.bottom + 92,
+                left: 16,
+                right: 16,
+                child: AnimatedOpacity(
+                  opacity: widget.showControls ? 1.0 : 0.0,
+                  duration: const Duration(milliseconds: 200),
+                  child: IgnorePointer(
+                    ignoring: !widget.showControls,
+                    child: Listener(
+                      onPointerDown: (_) => widget.onScrubbingChanged(true),
+                      onPointerUp: (_) => widget.onScrubbingChanged(false),
+                      onPointerCancel: (_) => widget.onScrubbingChanged(false),
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () {
+                          widget.onResetAutoHideTimer();
+                        },
+                        child: ValueListenableBuilder<VideoPlayerValue>(
+                          valueListenable: controller,
+                          builder: (context, val, _) {
+                            return Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 6,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.7),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Row(
+                                children: [
+                                  Text(
+                                    _formatDuration(val.position),
+                                    style: const TextStyle(
+                                      fontFamily: NuvexTypography.primaryFamily,
+                                      fontSize: 12,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: VideoProgressIndicator(
+                                      controller,
+                                      allowScrubbing: true,
+                                      padding: const EdgeInsets.symmetric(
+                                        vertical: 10,
+                                      ),
+                                      colors: const VideoProgressColors(
+                                        playedColor: NuvexColors.primaryBlue,
+                                        bufferedColor: Colors.white24,
+                                        backgroundColor: Colors.white12,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Text(
+                                    _formatDuration(val.duration),
+                                    style: TextStyle(
+                                      fontFamily: NuvexTypography.primaryFamily,
+                                      fontSize: 12,
+                                      color: Colors.white.withValues(
+                                        alpha: 0.7,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      );
+    }
+
+    // ── 2. Photo / Document Downloading State ──
     if (_isDownloading) {
       final percent = (_downloadProgress * 100).toInt();
       return Center(
@@ -1416,7 +2186,7 @@ class _MediaPageItemState extends State<_MediaPageItem>
       );
     }
 
-    // 2. Error state with retry button
+    // ── 3. Photo / Document Error State ──
     if (_downloadError != null) {
       return Center(
         child: Padding(
@@ -1461,7 +2231,7 @@ class _MediaPageItemState extends State<_MediaPageItem>
               ElevatedButton.icon(
                 onPressed: _startDownload,
                 icon: const Icon(Icons.refresh, size: 18),
-                label: const Text('Download Full Video'),
+                label: const Text('Download Full File'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: NuvexColors.primaryBlue,
                   foregroundColor: Colors.white,
@@ -1476,168 +2246,6 @@ class _MediaPageItemState extends State<_MediaPageItem>
               ),
             ],
           ),
-        ),
-      );
-    }
-
-    // 3. Video Player (Streaming via localhost proxy or verified local file)
-    if (_isVideo) {
-      if (!_isVideoInitialized || _videoPlayerController == null) {
-        return Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const SizedBox(
-                width: 48,
-                height: 48,
-                child: CircularProgressIndicator(
-                  strokeWidth: 3.5,
-                  color: NuvexColors.primaryBlue,
-                ),
-              ),
-              const SizedBox(height: 18),
-              Text(
-                _isStreaming
-                    ? 'Streaming instant video from Telegram...'
-                    : 'Loading video...',
-                style: const TextStyle(
-                  fontFamily: NuvexTypography.primaryFamily,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                  color: Colors.white,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                _currentFile.formattedSize,
-                style: TextStyle(
-                  fontFamily: NuvexTypography.primaryFamily,
-                  fontSize: 12,
-                  color: Colors.white.withValues(alpha: 0.6),
-                ),
-              ),
-            ],
-          ),
-        );
-      }
-
-      final controller = _videoPlayerController!;
-
-      return GestureDetector(
-        onTap: () {
-          widget.onToggleControls();
-        },
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            Center(
-              child: AspectRatio(
-                aspectRatio: controller.value.aspectRatio > 0
-                    ? controller.value.aspectRatio
-                    : 16 / 9,
-                child: VideoPlayer(controller),
-              ),
-            ),
-            // Play/Pause / Buffering tap overlay scoped to ValueListenableBuilder
-            ValueListenableBuilder<VideoPlayerValue>(
-              valueListenable: controller,
-              builder: (context, val, _) {
-                if (val.isBuffering) {
-                  return Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.5),
-                      shape: BoxShape.circle,
-                    ),
-                    child: const SizedBox(
-                      width: 36,
-                      height: 36,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 3,
-                        color: NuvexColors.primaryBlue,
-                      ),
-                    ),
-                  );
-                }
-                return GestureDetector(
-                  onTap: () {
-                    if (val.isPlaying) {
-                      controller.pause();
-                    } else {
-                      controller.play();
-                    }
-                  },
-                  child: Container(
-                    width: 68,
-                    height: 68,
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.55),
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(
-                      val.isPlaying ? Icons.pause : Icons.play_arrow,
-                      color: Colors.white,
-                      size: 40,
-                    ),
-                  ),
-                );
-              },
-            ),
-            // Video Bottom Progress Bar & Time scoped to ValueListenableBuilder
-            Positioned(
-              bottom: 72,
-              left: 16,
-              right: 16,
-              child: ValueListenableBuilder<VideoPlayerValue>(
-                valueListenable: controller,
-                builder: (context, val, _) {
-                  return Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.7),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Row(
-                      children: [
-                        Text(
-                          _formatDuration(val.position),
-                          style: const TextStyle(
-                            fontFamily: NuvexTypography.primaryFamily,
-                            fontSize: 12,
-                            color: Colors.white,
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: VideoProgressIndicator(
-                            controller,
-                            allowScrubbing: true,
-                            colors: const VideoProgressColors(
-                              playedColor: NuvexColors.primaryBlue,
-                              bufferedColor: Colors.white24,
-                              backgroundColor: Colors.white12,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Text(
-                          _formatDuration(val.duration),
-                          style: TextStyle(
-                            fontFamily: NuvexTypography.primaryFamily,
-                            fontSize: 12,
-                            color: Colors.white.withValues(alpha: 0.7),
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                },
-              ),
-            ),
-          ],
         ),
       );
     }

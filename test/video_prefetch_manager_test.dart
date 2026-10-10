@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -27,8 +26,13 @@ class MockPrefetchTelegramService extends TelegramMediaService {
     required int offset,
     required int limit,
     Duration timeout = const Duration(seconds: 30),
-    void Function(DateTime start, DateTime end, int elapsedMs, int activeAtStart)?
-        onMetrics,
+    void Function(
+      DateTime start,
+      DateTime end,
+      int elapsedMs,
+      int activeAtStart,
+    )?
+    onMetrics,
   }) async {
     // Check 1 KB alignment
     if (offset % 1024 != 0 || limit % 1024 != 0) {
@@ -56,7 +60,12 @@ class MockPrefetchTelegramService extends TelegramMediaService {
     final end = DateTime.now();
     activeRequests--;
 
-    onMetrics?.call(start, end, end.difference(start).inMilliseconds, activeAtStart);
+    onMetrics?.call(
+      start,
+      end,
+      end.difference(start).inMilliseconds,
+      activeAtStart,
+    );
 
     final available = totalFileSize > offset ? totalFileSize - offset : 0;
     final len = available < limit ? available : limit;
@@ -145,68 +154,85 @@ void main() {
       }
 
       // CRITICAL: Total downloaded data is substantially less than 150 MB
-      final totalDownloaded = mediaService.requests.fold<int>(0, (s, r) => s + r.limit);
+      final totalDownloaded = mediaService.requests.fold<int>(
+        0,
+        (s, r) => s + r.limit,
+      );
       expect(totalDownloaded, lessThan(20 * 1024 * 1024));
     });
 
-    test('Deduplicates in-flight requests between playback and prefetch', () async {
-      const fileSize = 50 * 1024 * 1024;
-      final file = createMockFile(messageId: 702, sizeBytes: fileSize);
-      final mediaService = MockPrefetchTelegramService(
-        totalFileSize: fileSize,
-        simulatedDelayMs: 80, // Slower download to test in-flight sharing
-      );
+    test(
+      'Deduplicates in-flight requests between playback and prefetch',
+      () async {
+        const fileSize = 50 * 1024 * 1024;
+        final file = createMockFile(messageId: 702, sizeBytes: fileSize);
+        final mediaService = MockPrefetchTelegramService(
+          totalFileSize: fileSize,
+          simulatedDelayMs: 80, // Slower download to test in-flight sharing
+        );
 
-      prefetchManager.start(file: file, mediaService: mediaService);
+        prefetchManager.start(file: file, mediaService: mediaService);
 
-      // Give prefetch a moment to initiate chunk 0/1
-      await Future.delayed(const Duration(milliseconds: 10));
+        // Give prefetch a moment to initiate chunk 0/1
+        await Future.delayed(const Duration(milliseconds: 10));
 
-      // ExoPlayer now requests chunk 1 while prefetch is fetching chunk 1
-      final chunk1Future = cacheManager.getChunk(
-        file: file,
-        chunkIndex: 1,
-        mediaService: mediaService,
-        isPlaybackRequest: true,
-      );
+        // ExoPlayer now requests chunk 1 while prefetch is fetching chunk 1
+        final chunk1Future = cacheManager.getChunk(
+          file: file,
+          chunkIndex: 1,
+          mediaService: mediaService,
+          isPlaybackRequest: true,
+        );
 
-      final chunk1Bytes = await chunk1Future;
-      expect(chunk1Bytes.length, 1024 * 1024);
+        final chunk1Bytes = await chunk1Future;
+        expect(chunk1Bytes.length, 1024 * 1024);
 
-      // Count how many requests were made for chunk 1 offset (1048576)
-      final chunk1Requests = mediaService.requests.where((r) => r.offset == 1024 * 1024).toList();
-      expect(chunk1Requests.length, 1, reason: 'Must share in-flight future without duplicate request');
-    });
+        // Count how many requests were made for chunk 1 offset (1048576)
+        final chunk1Requests = mediaService.requests
+            .where((r) => r.offset == 1024 * 1024)
+            .toList();
+        expect(
+          chunk1Requests.length,
+          1,
+          reason: 'Must share in-flight future without duplicate request',
+        );
+      },
+    );
 
-    test('Seeking cancels obsolete prefetch and rebuilds read-ahead window', () async {
-      const fileSize = 150 * 1024 * 1024;
-      final file = createMockFile(messageId: 703, sizeBytes: fileSize);
-      final mediaService = MockPrefetchTelegramService(
-        totalFileSize: fileSize,
-        simulatedDelayMs: 50,
-      );
+    test(
+      'Seeking cancels obsolete prefetch and rebuilds read-ahead window',
+      () async {
+        const fileSize = 150 * 1024 * 1024;
+        final file = createMockFile(messageId: 703, sizeBytes: fileSize);
+        final mediaService = MockPrefetchTelegramService(
+          totalFileSize: fileSize,
+          simulatedDelayMs: 50,
+        );
 
-      prefetchManager.start(file: file, mediaService: mediaService);
-      await Future.delayed(const Duration(milliseconds: 70));
+        prefetchManager.start(file: file, mediaService: mediaService);
+        await Future.delayed(const Duration(milliseconds: 70));
 
-      // User seeks to 80 MB (offset 83886080, chunk 80)
-      const seekOffset = 80 * 1024 * 1024;
-      prefetchManager.onPlaybackRangeRequested(
-        file: file,
-        start: seekOffset,
-        end: seekOffset + 524287,
-      );
+        // User seeks to 80 MB (offset 83886080, chunk 80)
+        const seekOffset = 80 * 1024 * 1024;
+        prefetchManager.onPlaybackRangeRequested(
+          file: file,
+          start: seekOffset,
+          end: seekOffset + 524287,
+        );
 
-      expect(prefetchManager.authoritativeBytePosition, seekOffset);
+        expect(prefetchManager.authoritativeBytePosition, seekOffset);
 
-      // Wait for prefetch workers to refocus around chunk 80
-      await Future.delayed(const Duration(milliseconds: 300));
+        // Wait for prefetch workers to refocus around chunk 80
+        await Future.delayed(const Duration(milliseconds: 300));
 
-      // Verify new requests are centered around chunk 80
-      final seekAreaRequests = mediaService.requests.where((r) => r.offset >= seekOffset).toList();
-      expect(seekAreaRequests.isNotEmpty, isTrue);
-      expect(seekAreaRequests.first.offset, greaterThanOrEqualTo(seekOffset));
-    });
+        // Verify new requests are centered around chunk 80
+        final seekAreaRequests = mediaService.requests
+            .where((r) => r.offset >= seekOffset)
+            .toList();
+        expect(seekAreaRequests.isNotEmpty, isTrue);
+        expect(seekAreaRequests.first.offset, greaterThanOrEqualTo(seekOffset));
+      },
+    );
 
     test('Cache hit returns immediately without contacting Telegram', () async {
       const fileSize = 20 * 1024 * 1024;
@@ -227,37 +253,46 @@ void main() {
 
       // Now start prefetch session at 0
       prefetchManager.start(file: file, mediaService: mediaService);
-      prefetchManager.onPlaybackRangeRequested(file: file, start: 0, end: 524287);
+      prefetchManager.onPlaybackRangeRequested(
+        file: file,
+        start: 0,
+        end: 524287,
+      );
 
       expect(cacheManager.isChunkCached(file.telegramMessageId, 0), isTrue);
 
       // Chunk 0 must not be re-requested
-      final chunk0Requests = mediaService.requests.where((r) => r.offset == 0).toList();
+      final chunk0Requests = mediaService.requests
+          .where((r) => r.offset == 0)
+          .toList();
       expect(chunk0Requests.length, 1);
     });
 
-    test('Playback requests take priority over background prefetch workers', () async {
-      const fileSize = 30 * 1024 * 1024;
-      final file = createMockFile(messageId: 705, sizeBytes: fileSize);
-      final mediaService = MockPrefetchTelegramService(
-        totalFileSize: fileSize,
-        simulatedDelayMs: 40,
-      );
+    test(
+      'Playback requests take priority over background prefetch workers',
+      () async {
+        const fileSize = 30 * 1024 * 1024;
+        final file = createMockFile(messageId: 705, sizeBytes: fileSize);
+        final mediaService = MockPrefetchTelegramService(
+          totalFileSize: fileSize,
+          simulatedDelayMs: 40,
+        );
 
-      prefetchManager.start(file: file, mediaService: mediaService);
+        prefetchManager.start(file: file, mediaService: mediaService);
 
-      // Simulate playback request arriving
-      final playbackFuture = cacheManager.getChunk(
-        file: file,
-        chunkIndex: 5,
-        mediaService: mediaService,
-        isPlaybackRequest: true,
-      );
+        // Simulate playback request arriving
+        final playbackFuture = cacheManager.getChunk(
+          file: file,
+          chunkIndex: 5,
+          mediaService: mediaService,
+          isPlaybackRequest: true,
+        );
 
-      expect(cacheManager.hasActivePlaybackRequests, isTrue);
-      final bytes = await playbackFuture;
-      expect(bytes.length, 1024 * 1024);
-      expect(cacheManager.hasActivePlaybackRequests, isFalse);
-    });
+        expect(cacheManager.hasActivePlaybackRequests, isTrue);
+        final bytes = await playbackFuture;
+        expect(bytes.length, 1024 * 1024);
+        expect(cacheManager.hasActivePlaybackRequests, isFalse);
+      },
+    );
   });
 }

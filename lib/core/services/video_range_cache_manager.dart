@@ -90,7 +90,8 @@ class VideoRangeCacheManager {
   final Set<String> _activePrefetches = {};
   int _activePrefetchWorkers = 0;
   static const int maxConcurrentPrefetch = 2;
-  static const int prefetchAheadCount = 8; // Keep 8 MB ahead of playhead (Task 8C)
+  static const int prefetchAheadCount =
+      8; // Keep 8 MB ahead of playhead (Task 8C)
   int? _currentPrefetchMessageId;
   int? _currentPlayheadChunk;
   final List<Completer<void>> _slotWaiters = [];
@@ -99,10 +100,7 @@ class VideoRangeCacheManager {
   static int _nextRequestId = 0;
   final Map<String, ChunkTrace> _traces = {};
 
-  VideoRangeCacheManager({
-    this.customCacheDirPath,
-    this.enablePrefetch = true,
-  });
+  VideoRangeCacheManager({this.customCacheDirPath, this.enablePrefetch = true});
 
   static final VideoRangeCacheManager instance = VideoRangeCacheManager();
 
@@ -203,13 +201,15 @@ class VideoRangeCacheManager {
     ChunkTrace? trace,
   }) async {
     final dedupeKey = '${file.telegramMessageId}_$chunkIndex';
-    final chunkTrace = trace ?? getOrCreateTrace(
-      messageId: file.telegramMessageId,
-      chunkIndex: chunkIndex,
-      byteOffset: chunkIndex * chunkSize,
-      requestedSize: chunkSize,
-      isPlaybackRequest: isPlaybackRequest,
-    );
+    final chunkTrace =
+        trace ??
+        getOrCreateTrace(
+          messageId: file.telegramMessageId,
+          chunkIndex: chunkIndex,
+          byteOffset: chunkIndex * chunkSize,
+          requestedSize: chunkSize,
+          isPlaybackRequest: isPlaybackRequest,
+        );
 
     if (isPlaybackRequest) {
       _activePlaybackRequests++;
@@ -222,7 +222,9 @@ class VideoRangeCacheManager {
         debugPrint(
           '[PERF_CACHE] RAM HIT chunk $chunkIndex for #${file.telegramMessageId}',
         );
-        _knownCachedChunks.putIfAbsent(file.telegramMessageId, () => {}).add(chunkIndex);
+        _knownCachedChunks
+            .putIfAbsent(file.telegramMessageId, () => {})
+            .add(chunkIndex);
         _memoryChunkLru.remove(dedupeKey);
         _memoryChunkLru.add(dedupeKey);
         return _memoryChunkCache[dedupeKey]!;
@@ -230,19 +232,24 @@ class VideoRangeCacheManager {
 
       final chunkFile = await getChunkFile(file.telegramMessageId, chunkIndex);
 
-      // 2. Return from disk cache if non-empty
-      if (chunkFile.existsSync() && chunkFile.lengthSync() > 0) {
-        chunkTrace.cacheHitMiss = 'DISK_HIT';
-        debugPrint(
-          '[PERF_CACHE] DISK HIT chunk $chunkIndex for #${file.telegramMessageId}',
-        );
-        _knownCachedChunks.putIfAbsent(file.telegramMessageId, () => {}).add(chunkIndex);
-        try {
-          chunkFile.setLastModifiedSync(DateTime.now());
-        } catch (_) {}
-        final bytes = chunkFile.readAsBytesSync();
-        _putInMemoryCache(dedupeKey, bytes);
-        return bytes;
+      // 2. Return from disk cache if non-empty (asynchronous read to never block UI isolate)
+      if (await chunkFile.exists()) {
+        final length = await chunkFile.length();
+        if (length > 0) {
+          chunkTrace.cacheHitMiss = 'DISK_HIT';
+          debugPrint(
+            '[PERF_CACHE] DISK HIT chunk $chunkIndex for #${file.telegramMessageId}',
+          );
+          _knownCachedChunks
+              .putIfAbsent(file.telegramMessageId, () => {})
+              .add(chunkIndex);
+          unawaited(
+            chunkFile.setLastModified(DateTime.now()).catchError((_) {}),
+          );
+          final bytes = await chunkFile.readAsBytes();
+          _putInMemoryCache(dedupeKey, bytes);
+          return bytes;
+        }
       }
 
       debugPrint(
@@ -275,7 +282,9 @@ class VideoRangeCacheManager {
       try {
         final result = await future;
         if (result.isNotEmpty) {
-          _knownCachedChunks.putIfAbsent(file.telegramMessageId, () => {}).add(chunkIndex);
+          _knownCachedChunks
+              .putIfAbsent(file.telegramMessageId, () => {})
+              .add(chunkIndex);
         }
         return result;
       } finally {
@@ -350,7 +359,11 @@ class VideoRangeCacheManager {
     return finalBytes;
   }
 
-  Future<void> _persistChunkToDisk(File chunkFile, Uint8List bytes, [ChunkTrace? trace]) async {
+  Future<void> _persistChunkToDisk(
+    File chunkFile,
+    Uint8List bytes, [
+    ChunkTrace? trace,
+  ]) async {
     final sw = Stopwatch()..start();
     try {
       final parentDir = chunkFile.parent;
@@ -515,9 +528,19 @@ class VideoRangeCacheManager {
       requestedSize: chunkSize,
       isPlaybackRequest: false,
     );
-    trace.timeInPrefetchQueueMs =
-        queueExitTime.difference(queueStartTime).inMilliseconds;
+    trace.timeInPrefetchQueueMs = queueExitTime
+        .difference(queueStartTime)
+        .inMilliseconds;
     trace.delayedBehindAnotherRequest = delayed;
+
+    // Rule 3: Playback requests MUST have higher priority than prefetch.
+    if (hasActivePlaybackRequests) {
+      debugPrint(
+        '[PERF_PREFETCH] Pausing prefetch chunk $chunkIndex because playback is active',
+      );
+      _activePrefetches.remove(key);
+      return;
+    }
 
     _activePrefetchWorkers++;
     debugPrint(
@@ -533,39 +556,45 @@ class VideoRangeCacheManager {
         trace: trace,
       );
     } catch (e, stack) {
-      debugPrint('[PERF_PREFETCH] Error prefetching chunk $chunkIndex: $e\n$stack');
+      debugPrint(
+        '[PERF_PREFETCH] Error prefetching chunk $chunkIndex: $e\n$stack',
+      );
     } finally {
       _activePrefetchWorkers--;
       _activePrefetches.remove(key);
       _releaseWorkerSlot();
 
       if (!trace.isPlaybackRequest) {
-        trace.totalEndToEndLatencyMs =
-            DateTime.now().difference(trace.traceStartTime).inMilliseconds;
+        trace.totalEndToEndLatencyMs = DateTime.now()
+            .difference(trace.traceStartTime)
+            .inMilliseconds;
         trace.logSummary();
       }
 
       // Continuous pipeline: immediately refill next uncached chunk in window
-      if (_currentPrefetchMessageId == file.telegramMessageId) {
+      if (_currentPrefetchMessageId == file.telegramMessageId &&
+          !hasActivePlaybackRequests) {
         _fillPrefetchPipeline(file, mediaService);
       }
     }
   }
 
   /// Warmed up the in-memory index of locally cached chunks for [messageId].
-  void warmUpCacheState(int messageId) {
+  Future<void> warmUpCacheState(int messageId) async {
     try {
-      if (_resolvedCacheDir != null) {
-        final dir = Directory('$_resolvedCacheDir/$messageId');
-        if (dir.existsSync()) {
-          final set = _knownCachedChunks.putIfAbsent(messageId, () => {});
-          for (final entity in dir.listSync(followLinks: false)) {
-            if (entity is File) {
-              final name = entity.uri.pathSegments.last;
-              if (name.startsWith('chunk_') && name.endsWith('.part')) {
-                final idxStr = name.substring(6, name.length - 5);
-                final idx = int.tryParse(idxStr);
-                if (idx != null && entity.lengthSync() > 0) {
+      final base = await getCacheDirectoryPath();
+      final dir = Directory('$base/$messageId');
+      if (await dir.exists()) {
+        final set = _knownCachedChunks.putIfAbsent(messageId, () => {});
+        await for (final entity in dir.list(followLinks: false)) {
+          if (entity is File) {
+            final name = entity.uri.pathSegments.last;
+            if (name.startsWith('chunk_') && name.endsWith('.part')) {
+              final idxStr = name.substring(6, name.length - 5);
+              final idx = int.tryParse(idxStr);
+              if (idx != null) {
+                final len = await entity.length();
+                if (len > 0) {
                   set.add(idx);
                 }
               }
@@ -580,7 +609,9 @@ class VideoRangeCacheManager {
   bool isChunkCached(int messageId, int chunkIndex) {
     final key = '${messageId}_$chunkIndex';
     if (_memoryChunkCache.containsKey(key)) return true;
-    if (_knownCachedChunks[messageId]?.contains(chunkIndex) ?? false) return true;
+    if (_knownCachedChunks[messageId]?.contains(chunkIndex) ?? false) {
+      return true;
+    }
     if (_resolvedCacheDir != null) {
       final f = File('$_resolvedCacheDir/$messageId/chunk_$chunkIndex.part');
       if (f.existsSync() && f.lengthSync() > 0) {
@@ -592,7 +623,11 @@ class VideoRangeCacheManager {
   }
 
   /// Calculates the contiguous bytes cached without any gaps starting from [currentByteOffset].
-  int getContiguousBufferedAhead(int messageId, int currentByteOffset, int totalSize) {
+  int getContiguousBufferedAhead(
+    int messageId,
+    int currentByteOffset,
+    int totalSize,
+  ) {
     if (totalSize <= 0 || currentByteOffset >= totalSize) return 0;
     final currentChunk = currentByteOffset ~/ chunkSize;
     final totalChunks = (totalSize + chunkSize - 1) ~/ chunkSize;
@@ -609,7 +644,10 @@ class VideoRangeCacheManager {
   }
 
   /// Returns all contiguous cached byte intervals [start, end] for [messageId].
-  List<({int start, int end})> getContiguousCachedRanges(int messageId, int totalSize) {
+  List<({int start, int end})> getContiguousCachedRanges(
+    int messageId,
+    int totalSize,
+  ) {
     if (totalSize <= 0) return [];
     final totalChunks = (totalSize + chunkSize - 1) ~/ chunkSize;
     final ranges = <({int start, int end})>[];

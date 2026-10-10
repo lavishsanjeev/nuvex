@@ -75,22 +75,74 @@ import 'dart:typed_data';
   return null;
 }
 
+/// In-memory cache for validated HQ thumbnail file paths.
+/// Avoids repeated synchronous disk I/O and JPEG header parsing on every build frame.
+final Map<String, bool> _hqThumbnailValidationCache = <String, bool>{};
+
+/// Records a validated HQ thumbnail path directly into the validation cache.
+void markThumbnailAsValidated(String path, {bool isValid = true}) {
+  _hqThumbnailValidationCache[path] = isValid;
+}
+
+/// Validates whether a cached thumbnail file is a genuine high-quality thumbnail asynchronously.
+///
+/// Prevents main-isolate blocking by using non-blocking asynchronous file operations.
+Future<bool> isValidHqThumbnailAsync(File file) async {
+  final path = file.path;
+  final cached = _hqThumbnailValidationCache[path];
+  if (cached != null) return cached;
+
+  try {
+    if (!await file.exists() || await file.length() < 1500) {
+      _hqThumbnailValidationCache[path] = false;
+      return false;
+    }
+    final raf = await file.open(mode: FileMode.read);
+    final Uint8List bytes;
+    try {
+      bytes = await raf.read(4096);
+    } finally {
+      await raf.close();
+    }
+    final dims = getJpegDimensions(bytes);
+    final isValid = dims != null && dims.width >= 120 && dims.height >= 120;
+    _hqThumbnailValidationCache[path] = isValid;
+    return isValid;
+  } catch (_) {
+    _hqThumbnailValidationCache[path] = false;
+    return false;
+  }
+}
+
 /// Validates whether a cached thumbnail file is a genuine high-quality thumbnail.
 ///
 /// Ensures:
-/// 1. File exists and is > 1500 bytes (stripped thumbnails are ~700 bytes).
-/// 2. Header decodes to actual dimensions with width >= 120 and height >= 120
-///    (stripped thumbnails are 40x40; real Telegram 'm' thumbnails are ~320x320).
+/// 1. Fast check against in-memory cache to eliminate repeated disk I/O.
+/// 2. If not cached, safely checks existence and parses header.
 bool isValidHqThumbnail(File file) {
+  final path = file.path;
+  final cached = _hqThumbnailValidationCache[path];
+  if (cached != null) return cached;
+
   try {
     if (!file.existsSync() || file.lengthSync() < 1500) {
+      _hqThumbnailValidationCache[path] = false;
       return false;
     }
-    final bytes = file.readAsBytesSync();
+    // Only read up to 4096 bytes to inspect JPEG SOF headers rather than loading entire file
+    final raf = file.openSync(mode: FileMode.read);
+    final Uint8List bytes;
+    try {
+      bytes = raf.readSync(4096);
+    } finally {
+      raf.closeSync();
+    }
     final dims = getJpegDimensions(bytes);
-    if (dims == null) return false;
-    return dims.width >= 120 && dims.height >= 120;
+    final isValid = dims != null && dims.width >= 120 && dims.height >= 120;
+    _hqThumbnailValidationCache[path] = isValid;
+    return isValid;
   } catch (_) {
+    _hqThumbnailValidationCache[path] = false;
     return false;
   }
 }

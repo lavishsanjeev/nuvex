@@ -252,10 +252,9 @@ class _AccountScreenState extends State<AccountScreen> {
     if (confirmed == true && mounted) {
       await _authController.logout();
       if (mounted) {
-        Navigator.of(context).pushNamedAndRemoveUntil(
-          NuvexRoutes.gettingStarted,
-          (route) => false,
-        );
+        Navigator.of(
+          context,
+        ).pushNamedAndRemoveUntil(NuvexRoutes.gettingStarted, (route) => false);
       }
     }
   }
@@ -291,7 +290,10 @@ class _AccountScreenState extends State<AccountScreen> {
         scrolledUnderElevation: 0,
         centerTitle: false,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_rounded, color: NuvexColors.darkNavy),
+          icon: const Icon(
+            Icons.arrow_back_rounded,
+            color: NuvexColors.darkNavy,
+          ),
           onPressed: () => Navigator.of(context).pop(),
         ),
         title: const Text(
@@ -495,7 +497,10 @@ class _AccountScreenState extends State<AccountScreen> {
                   Padding(
                     padding: const EdgeInsets.only(top: 4),
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 2,
+                      ),
                       decoration: BoxDecoration(
                         color: const Color(0xFFF1F5F9),
                         borderRadius: BorderRadius.circular(6),
@@ -596,7 +601,10 @@ class _AccountScreenState extends State<AccountScreen> {
                 ],
               ),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 4,
+                ),
                 decoration: BoxDecoration(
                   color: const Color(0xFFF1F5F9),
                   borderRadius: BorderRadius.circular(12),
@@ -648,7 +656,11 @@ class _AccountScreenState extends State<AccountScreen> {
           // Explicit Quota Notice (No fake numbers)
           Row(
             children: const [
-              Icon(Icons.info_outline_rounded, size: 14, color: Color(0xFF64748B)),
+              Icon(
+                Icons.info_outline_rounded,
+                size: 14,
+                color: Color(0xFF64748B),
+              ),
               SizedBox(width: 6),
               Expanded(
                 child: Text(
@@ -676,22 +688,30 @@ class _AccountScreenState extends State<AccountScreen> {
                         if (pRatio > 0)
                           Expanded(
                             flex: (pRatio * 1000).round().clamp(1, 1000),
-                            child: Container(color: const Color(0xFF2563EB)), // Photos
+                            child: Container(
+                              color: const Color(0xFF2563EB),
+                            ), // Photos
                           ),
                         if (vRatio > 0)
                           Expanded(
                             flex: (vRatio * 1000).round().clamp(1, 1000),
-                            child: Container(color: const Color(0xFF8B5CF6)), // Videos
+                            child: Container(
+                              color: const Color(0xFF8B5CF6),
+                            ), // Videos
                           ),
                         if (dRatio > 0)
                           Expanded(
                             flex: (dRatio * 1000).round().clamp(1, 1000),
-                            child: Container(color: const Color(0xFFF59E0B)), // Docs
+                            child: Container(
+                              color: const Color(0xFFF59E0B),
+                            ), // Docs
                           ),
                         if (oRatio > 0)
                           Expanded(
                             flex: (oRatio * 1000).round().clamp(1, 1000),
-                            child: Container(color: const Color(0xFF10B981)), // Other
+                            child: Container(
+                              color: const Color(0xFF10B981),
+                            ), // Other
                           ),
                       ],
                     )
@@ -747,10 +767,7 @@ class _AccountScreenState extends State<AccountScreen> {
             Container(
               width: 10,
               height: 10,
-              decoration: BoxDecoration(
-                color: color,
-                shape: BoxShape.circle,
-              ),
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
             ),
             const SizedBox(width: 10),
             Text(
@@ -806,49 +823,54 @@ class _AccountScreenState extends State<AccountScreen> {
         borderRadius: BorderRadius.circular(20),
         child: Column(
           children: [
-          _buildDrillDownRow(
-            icon: Icons.photo_library_outlined,
-            iconColor: const Color(0xFF2563EB),
-            title: 'Photos',
-            subtitle: '${_storageStats.photos.count} items • ${formatBytes(_storageStats.photos.totalBytes)}',
-            onTap: () => _navigateToCollection('Photos', 'photos'),
-          ),
-          const Divider(height: 1, indent: 56, color: Color(0xFFF1F5F9)),
-          _buildDrillDownRow(
-            icon: Icons.videocam_outlined,
-            iconColor: const Color(0xFF8B5CF6),
-            title: 'Videos',
-            subtitle: '${_storageStats.videos.count} items • ${formatBytes(_storageStats.videos.totalBytes)}',
-            onTap: () => _navigateToCollection('Videos', 'videos'),
-          ),
-          const Divider(height: 1, indent: 56, color: Color(0xFFF1F5F9)),
-          _buildDrillDownRow(
-            icon: Icons.description_outlined,
-            iconColor: const Color(0xFFF59E0B),
-            title: 'Files & Documents',
-            subtitle: '${_storageStats.documents.count} items • ${formatBytes(_storageStats.documents.totalBytes)}',
-            onTap: () => _navigateToCollection('Documents', 'documents'),
-          ),
-          const Divider(height: 1, indent: 56, color: Color(0xFFF1F5F9)),
-          _buildDrillDownRow(
-            icon: Icons.history_rounded,
-            iconColor: const Color(0xFF10B981),
-            title: 'Recently Added',
-            subtitle: 'Media indexed in the past 7 days',
-            onTap: () => _navigateToCollection('Recently Added', 'recently_added'),
-          ),
-          const Divider(height: 1, indent: 56, color: Color(0xFFF1F5F9)),
-          _buildDrillDownRow(
-            icon: Icons.storage_rounded,
-            iconColor: const Color(0xFFEC4899),
-            title: 'Largest Files',
-            subtitle: 'Sort all media by descending file size',
-            onTap: () => _navigateToCollection('Largest Files', 'largest_files'),
-          ),
-        ],
+            _buildDrillDownRow(
+              icon: Icons.photo_library_outlined,
+              iconColor: const Color(0xFF2563EB),
+              title: 'Photos',
+              subtitle:
+                  '${_storageStats.photos.count} items • ${formatBytes(_storageStats.photos.totalBytes)}',
+              onTap: () => _navigateToCollection('Photos', 'photos'),
+            ),
+            const Divider(height: 1, indent: 56, color: Color(0xFFF1F5F9)),
+            _buildDrillDownRow(
+              icon: Icons.videocam_outlined,
+              iconColor: const Color(0xFF8B5CF6),
+              title: 'Videos',
+              subtitle:
+                  '${_storageStats.videos.count} items • ${formatBytes(_storageStats.videos.totalBytes)}',
+              onTap: () => _navigateToCollection('Videos', 'videos'),
+            ),
+            const Divider(height: 1, indent: 56, color: Color(0xFFF1F5F9)),
+            _buildDrillDownRow(
+              icon: Icons.description_outlined,
+              iconColor: const Color(0xFFF59E0B),
+              title: 'Files & Documents',
+              subtitle:
+                  '${_storageStats.documents.count} items • ${formatBytes(_storageStats.documents.totalBytes)}',
+              onTap: () => _navigateToCollection('Documents', 'documents'),
+            ),
+            const Divider(height: 1, indent: 56, color: Color(0xFFF1F5F9)),
+            _buildDrillDownRow(
+              icon: Icons.history_rounded,
+              iconColor: const Color(0xFF10B981),
+              title: 'Recently Added',
+              subtitle: 'Media indexed in the past 7 days',
+              onTap: () =>
+                  _navigateToCollection('Recently Added', 'recently_added'),
+            ),
+            const Divider(height: 1, indent: 56, color: Color(0xFFF1F5F9)),
+            _buildDrillDownRow(
+              icon: Icons.storage_rounded,
+              iconColor: const Color(0xFFEC4899),
+              title: 'Largest Files',
+              subtitle: 'Sort all media by descending file size',
+              onTap: () =>
+                  _navigateToCollection('Largest Files', 'largest_files'),
+            ),
+          ],
+        ),
       ),
-    ),
-  );
+    );
   }
 
   Widget _buildDrillDownRow({
@@ -897,7 +919,9 @@ class _AccountScreenState extends State<AccountScreen> {
   // ── Telegram Synchronization Card ──
   Widget _buildSyncCard() {
     final isSyncing = _mediaController.isSyncing;
-    final lastSync = _mediaController.recentMedia.isNotEmpty ? 'Recently' : 'Never';
+    final lastSync = _mediaController.recentMedia.isNotEmpty
+        ? 'Recently'
+        : 'Never';
     final count = _mediaController.recentMedia.length;
 
     return Container(
@@ -940,7 +964,9 @@ class _AccountScreenState extends State<AccountScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      isSyncing ? 'Synchronizing media...' : 'Sync with Telegram',
+                      isSyncing
+                          ? 'Synchronizing media...'
+                          : 'Sync with Telegram',
                       style: const TextStyle(
                         fontFamily: NuvexTypography.primaryFamily,
                         fontSize: 15,
@@ -1142,78 +1168,88 @@ class _AccountScreenState extends State<AccountScreen> {
         borderRadius: BorderRadius.circular(20),
         child: Column(
           children: [
-          SwitchListTile(
-            title: const Text(
-              'Automatic Background Sync',
-              style: TextStyle(
-                fontFamily: NuvexTypography.primaryFamily,
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                color: NuvexColors.darkNavy,
+            SwitchListTile(
+              title: const Text(
+                'Automatic Background Sync',
+                style: TextStyle(
+                  fontFamily: NuvexTypography.primaryFamily,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: NuvexColors.darkNavy,
+                ),
               ),
-            ),
-            subtitle: const Text(
-              'Keep Saved Messages metadata in sync when opening the app',
-              style: TextStyle(
-                fontFamily: NuvexTypography.primaryFamily,
-                fontSize: 12,
-                color: NuvexColors.secondaryText,
+              subtitle: const Text(
+                'Keep Saved Messages metadata in sync when opening the app',
+                style: TextStyle(
+                  fontFamily: NuvexTypography.primaryFamily,
+                  fontSize: 12,
+                  color: NuvexColors.secondaryText,
+                ),
               ),
+              value: _autoSync,
+              activeThumbColor: NuvexColors.primaryBlue,
+              onChanged: (val) => setState(() => _autoSync = val),
             ),
-            value: _autoSync,
-            activeThumbColor: NuvexColors.primaryBlue,
-            onChanged: (val) => setState(() => _autoSync = val),
-          ),
-          const Divider(height: 1, indent: 16, endIndent: 16, color: Color(0xFFF1F5F9)),
-          SwitchListTile(
-            title: const Text(
-              'Wi-Fi Only Media Loading',
-              style: TextStyle(
-                fontFamily: NuvexTypography.primaryFamily,
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                color: NuvexColors.darkNavy,
+            const Divider(
+              height: 1,
+              indent: 16,
+              endIndent: 16,
+              color: Color(0xFFF1F5F9),
+            ),
+            SwitchListTile(
+              title: const Text(
+                'Wi-Fi Only Media Loading',
+                style: TextStyle(
+                  fontFamily: NuvexTypography.primaryFamily,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: NuvexColors.darkNavy,
+                ),
               ),
-            ),
-            subtitle: const Text(
-              'Prevent heavy video streaming over cellular data',
-              style: TextStyle(
-                fontFamily: NuvexTypography.primaryFamily,
-                fontSize: 12,
-                color: NuvexColors.secondaryText,
+              subtitle: const Text(
+                'Prevent heavy video streaming over cellular data',
+                style: TextStyle(
+                  fontFamily: NuvexTypography.primaryFamily,
+                  fontSize: 12,
+                  color: NuvexColors.secondaryText,
+                ),
               ),
+              value: _wifiOnly,
+              activeThumbColor: NuvexColors.primaryBlue,
+              onChanged: (val) => setState(() => _wifiOnly = val),
             ),
-            value: _wifiOnly,
-            activeThumbColor: NuvexColors.primaryBlue,
-            onChanged: (val) => setState(() => _wifiOnly = val),
-          ),
-          const Divider(height: 1, indent: 16, endIndent: 16, color: Color(0xFFF1F5F9)),
-          SwitchListTile(
-            title: const Text(
-              'App Notifications',
-              style: TextStyle(
-                fontFamily: NuvexTypography.primaryFamily,
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                color: NuvexColors.darkNavy,
+            const Divider(
+              height: 1,
+              indent: 16,
+              endIndent: 16,
+              color: Color(0xFFF1F5F9),
+            ),
+            SwitchListTile(
+              title: const Text(
+                'App Notifications',
+                style: TextStyle(
+                  fontFamily: NuvexTypography.primaryFamily,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: NuvexColors.darkNavy,
+                ),
               ),
-            ),
-            subtitle: const Text(
-              'Alerts for upload and sync completions',
-              style: TextStyle(
-                fontFamily: NuvexTypography.primaryFamily,
-                fontSize: 12,
-                color: NuvexColors.secondaryText,
+              subtitle: const Text(
+                'Alerts for upload and sync completions',
+                style: TextStyle(
+                  fontFamily: NuvexTypography.primaryFamily,
+                  fontSize: 12,
+                  color: NuvexColors.secondaryText,
+                ),
               ),
+              value: _notifications,
+              activeThumbColor: NuvexColors.primaryBlue,
+              onChanged: (val) => setState(() => _notifications = val),
             ),
-            value: _notifications,
-            activeThumbColor: NuvexColors.primaryBlue,
-            onChanged: (val) => setState(() => _notifications = val),
-          ),
-        ],
+          ],
+        ),
       ),
-    ),
-  );
+    );
   }
 
   // ── Session Card ──

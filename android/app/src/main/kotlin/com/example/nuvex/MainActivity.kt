@@ -94,6 +94,101 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
+                "shareFiles" -> {
+                    val filePaths = call.argument<List<String>>("filePaths")
+                    val mimeTypes = call.argument<List<String>>("mimeTypes") ?: emptyList()
+                    val title = call.argument<String>("title") ?: "Share Media"
+
+                    if (filePaths.isNullOrEmpty()) {
+                        result.error("INVALID_ARGS", "filePaths must not be null or empty", null)
+                        return@setMethodCallHandler
+                    }
+
+                    try {
+                        val sharedDir = File(cacheDir, "shared_media").apply {
+                            if (!exists()) mkdirs()
+                            try { File(this, ".nomedia").createNewFile() } catch (_: Exception) {}
+                        }
+                        cleanSharedMediaCache(sharedDir)
+
+                        val uris = ArrayList<Uri>()
+                        for (filePath in filePaths) {
+                            val file = File(filePath)
+                            if (file.exists() && file.length() > 0L) {
+                                val cleanFileName = file.name.replace(Regex("^\\d+_"), "")
+                                val targetFile = File(sharedDir, if (cleanFileName.isNotBlank()) cleanFileName else file.name)
+                                if (!targetFile.exists() || targetFile.length() != file.length()) {
+                                    file.copyTo(targetFile, overwrite = true)
+                                }
+                                val contentUri: Uri = FileProvider.getUriForFile(
+                                    this,
+                                    "${packageName}.fileprovider",
+                                    targetFile
+                                )
+                                uris.add(contentUri)
+                            }
+                        }
+
+                        if (uris.isEmpty()) {
+                            result.error("FILE_NOT_FOUND", "No valid local files found to share", null)
+                            return@setMethodCallHandler
+                        }
+
+                        var resolvedMime = "*/*"
+                        if (mimeTypes.isNotEmpty()) {
+                            val first = mimeTypes[0].trim()
+                            val allSame = mimeTypes.all { it.trim() == first }
+                            if (allSame && first.isNotBlank() && first != "*/*") {
+                                resolvedMime = first
+                            } else {
+                                val prefix = first.substringBefore('/')
+                                val allSameType = mimeTypes.all { it.trim().startsWith("$prefix/") }
+                                if (allSameType && prefix.isNotBlank()) {
+                                    resolvedMime = "$prefix/*"
+                                }
+                            }
+                        }
+
+                        val shareIntent = if (uris.size == 1) {
+                            Intent(Intent.ACTION_SEND).apply {
+                                type = resolvedMime
+                                putExtra(Intent.EXTRA_STREAM, uris[0])
+                                clipData = ClipData.newRawUri("Nuvex Media", uris[0])
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                        } else {
+                            Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                                type = resolvedMime
+                                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                                val clip = ClipData.newRawUri("Nuvex Media", uris[0])
+                                for (i in 1 until uris.size) {
+                                    clip.addItem(ClipData.Item(uris[i]))
+                                }
+                                clipData = clip
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                        }
+
+                        val chooser = Intent.createChooser(shareIntent, title).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+
+                        val resInfoList = packageManager.queryIntentActivities(shareIntent, PackageManager.MATCH_DEFAULT_ONLY)
+                        for (resolveInfo in resInfoList) {
+                            val pkgName = resolveInfo.activityInfo.packageName
+                            for (uri in uris) {
+                                grantUriPermission(pkgName, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                        }
+
+                        startActivity(chooser)
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("SHARE_FAILED", e.localizedMessage, null)
+                    }
+                }
+
                 "saveToDevice" -> {
                     val filePath = call.argument<String>("filePath")
                     val fileName = call.argument<String>("fileName") ?: "downloaded_file"
@@ -221,7 +316,7 @@ class MainActivity : FlutterActivity() {
             val sortedFiles = files.filter { it.name != ".nomedia" }.sortedByDescending { it.lastModified() }
             for (i in sortedFiles.indices) {
                 val f = sortedFiles[i]
-                if (i >= 10 || f.lastModified() < oneDayAgo) {
+                if (i >= 100 || f.lastModified() < oneDayAgo) {
                     f.delete()
                 }
             }

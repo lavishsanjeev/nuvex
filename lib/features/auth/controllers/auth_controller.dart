@@ -111,6 +111,7 @@ class AuthController extends ChangeNotifier {
   bool get isVerifyingCode => _status == AuthStatus.verifyingCode;
   bool get isVerifyingPassword => _status == AuthStatus.verifyingPassword;
   bool get isAuthenticated => _status == AuthStatus.authenticated;
+  bool get isInitialized => _status != AuthStatus.uninitialized;
 
   /// Initializes controller by checking local secure storage and attempting silent session restore.
   Future<void> initialize() async {

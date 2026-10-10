@@ -27,6 +27,9 @@ class RemoteFile {
   final int? height;
   final String
   category; // 'photos', 'videos', 'documents', 'screenshots', 'stickers', etc.
+  final bool isTrashed;
+  final DateTime? trashedAt;
+  final String? sha256;
 
   const RemoteFile({
     required this.id,
@@ -50,6 +53,9 @@ class RemoteFile {
     this.width,
     this.height,
     required this.category,
+    this.isTrashed = false,
+    this.trashedAt,
+    this.sha256,
   });
 
   RemoteFile copyWith({
@@ -74,6 +80,9 @@ class RemoteFile {
     int? width,
     int? height,
     String? category,
+    bool? isTrashed,
+    DateTime? trashedAt,
+    String? sha256,
   }) {
     return RemoteFile(
       id: id ?? this.id,
@@ -97,6 +106,9 @@ class RemoteFile {
       width: width ?? this.width,
       height: height ?? this.height,
       category: category ?? this.category,
+      isTrashed: isTrashed ?? this.isTrashed,
+      trashedAt: trashedAt ?? this.trashedAt,
+      sha256: sha256 ?? this.sha256,
     );
   }
 
@@ -104,6 +116,20 @@ class RemoteFile {
   bool get isVideo => category == 'videos' || mimeType.startsWith('video/');
   bool get isDocument => category == 'documents';
   bool get isScreenshot => category == 'screenshots';
+
+  /// Returns remaining days before permanent 30-day deletion.
+  int get daysRemainingInTrash {
+    if (trashedAt == null) return 30;
+    final elapsed = DateTime.now().difference(trashedAt!).inDays;
+    final remaining = 30 - elapsed;
+    return remaining < 0 ? 0 : remaining;
+  }
+
+  /// Whether this item has surpassed the 30-day retention window.
+  bool get isExpiredInTrash {
+    if (trashedAt == null) return false;
+    return DateTime.now().difference(trashedAt!).inDays >= 30;
+  }
 
   String get formattedSize {
     if (sizeBytes < 1024) return '$sizeBytes B';
@@ -146,6 +172,9 @@ class RemoteFile {
     'width': width,
     'height': height,
     'category': category,
+    'isTrashed': isTrashed ? 1 : 0,
+    'trashedAt': trashedAt?.millisecondsSinceEpoch,
+    'sha256': sha256,
   };
 
   factory RemoteFile.fromMap(Map<String, dynamic> map) => RemoteFile(
@@ -174,5 +203,10 @@ class RemoteFile {
     width: map['width'] as int?,
     height: map['height'] as int?,
     category: map['category'] as String? ?? 'documents',
+    isTrashed: (map['isTrashed'] as int? ?? 0) == 1,
+    trashedAt: map['trashedAt'] != null
+        ? DateTime.fromMillisecondsSinceEpoch(map['trashedAt'] as int)
+        : null,
+    sha256: map['sha256'] as String?,
   );
 }

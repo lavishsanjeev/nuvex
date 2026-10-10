@@ -26,7 +26,13 @@ abstract class NuvexRoutes {
 
 /// Simple declarative navigation route generator.
 abstract class NuvexRouter {
-  static Route<dynamic> onGenerateRoute(RouteSettings settings) {
+  static Route<dynamic> onGenerateRoute(
+    RouteSettings settings, {
+    AuthController? defaultAuthController,
+  }) {
+    final controller =
+        settings.arguments as AuthController? ?? defaultAuthController;
+
     switch (settings.name) {
       case NuvexRoutes.account:
         return MaterialPageRoute(
@@ -39,49 +45,48 @@ abstract class NuvexRouter {
           builder: (_) => const OnboardingScreen(),
         );
       case NuvexRoutes.credentials:
-        final controller = settings.arguments as AuthController?;
         return MaterialPageRoute(
           settings: settings,
           builder: (_) => LoginPage(controller: controller),
         );
       case NuvexRoutes.phone:
-        final controller =
-            settings.arguments as AuthController? ?? AuthController();
+        final authController = controller ?? AuthController();
         return MaterialPageRoute(
           settings: settings,
-          builder: (_) => PhoneScreen(controller: controller),
+          builder: (_) => PhoneScreen(controller: authController),
         );
       case NuvexRoutes.code:
-        final controller =
-            settings.arguments as AuthController? ?? AuthController();
+        final authController = controller ?? AuthController();
         return MaterialPageRoute(
           settings: settings,
-          builder: (_) => CodeScreen(controller: controller),
+          builder: (_) => CodeScreen(controller: authController),
         );
       case NuvexRoutes.password:
-        final controller =
-            settings.arguments as AuthController? ?? AuthController();
+        final authController = controller ?? AuthController();
         return MaterialPageRoute(
           settings: settings,
-          builder: (_) => Password2FAScreen(controller: controller),
+          builder: (_) => Password2FAScreen(controller: authController),
         );
       case NuvexRoutes.authenticated:
-        final controller =
-            settings.arguments as AuthController? ?? AuthController();
+        final authController = controller ?? AuthController();
         return MaterialPageRoute(
           settings: settings,
-          builder: (_) => AuthenticatedScreen(controller: controller),
+          builder: (_) => AuthenticatedScreen(controller: authController),
         );
       case NuvexRoutes.home:
-        final controller =
-            settings.arguments as AuthController? ?? AuthController();
+        final authController = controller ?? AuthController();
         return MaterialPageRoute(
           settings: settings,
-          builder: (_) => HomeScreen(controller: controller),
+          builder: (_) => HomeScreen(controller: authController),
         );
       case NuvexRoutes.initial:
       default:
-        final controller = settings.arguments as AuthController?;
+        if (controller != null && controller.isAuthenticated) {
+          return MaterialPageRoute(
+            settings: settings,
+            builder: (_) => HomeScreen(controller: controller),
+          );
+        }
         return MaterialPageRoute(
           settings: settings,
           builder: (_) => StartupScreen(controller: controller),

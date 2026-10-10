@@ -79,6 +79,7 @@ class SavedMessagesPageResult {
 class TelegramMediaService {
   final TelegramAuthService _authService;
   final Map<int, t.InputDocumentFileLocation> _locationCache = {};
+  final Map<int, Future<t.InputDocumentFileLocation>> _inFlightLocations = {};
 
   TelegramMediaService({TelegramAuthService? authService})
     : _authService = authService ?? TelegramAuthService();
@@ -94,14 +95,16 @@ class TelegramMediaService {
   void clearLocationCache([int? messageId]) {
     if (messageId != null) {
       _locationCache.remove(messageId);
+      _inFlightLocations.remove(messageId);
     } else {
       _locationCache.clear();
+      _inFlightLocations.clear();
     }
   }
 
   /// Resolves the up-to-date MTProto [InputDocumentFileLocation] for a [RemoteFile].
   ///
-  /// Caches the location to avoid redundant `messages.getMessages` round trips.
+  /// Caches the location and deduplicates concurrent in-flight requests to avoid redundant RPC round trips.
   /// If [forceRefresh] is true, queries fresh metadata from Telegram.
   Future<t.InputDocumentFileLocation> resolveDocumentLocation(
     RemoteFile file, {
@@ -114,6 +117,34 @@ class TelegramMediaService {
       return _locationCache[file.telegramMessageId]!;
     }
 
+    if (!forceRefresh &&
+        _inFlightLocations.containsKey(file.telegramMessageId)) {
+      debugPrint(
+        '[PERF_LOCATION] In-flight location request deduped for #${file.telegramMessageId}',
+      );
+      return await _inFlightLocations[file.telegramMessageId]!;
+    }
+
+    final future = _resolveDocumentLocationInternal(
+      file,
+      forceRefresh: forceRefresh,
+    );
+    if (!forceRefresh) {
+      _inFlightLocations[file.telegramMessageId] = future;
+    }
+    try {
+      return await future;
+    } finally {
+      if (!forceRefresh) {
+        _inFlightLocations.remove(file.telegramMessageId);
+      }
+    }
+  }
+
+  Future<t.InputDocumentFileLocation> _resolveDocumentLocationInternal(
+    RemoteFile file, {
+    bool forceRefresh = false,
+  }) async {
     debugPrint(
       '[PERF_LOCATION] Location cache MISS for #${file.telegramMessageId} (forceRefresh: $forceRefresh). Fetching fresh metadata...',
     );
@@ -206,7 +237,13 @@ class TelegramMediaService {
     required int offset,
     required int limit,
     Duration timeout = const Duration(seconds: 30),
-    void Function(DateTime start, DateTime end, int elapsedMs, int activeAtStart)? onMetrics,
+    void Function(
+      DateTime start,
+      DateTime end,
+      int elapsedMs,
+      int activeAtStart,
+    )?
+    onMetrics,
   }) async {
     if (offset < 0) {
       throw ArgumentError('Offset must be non-negative: $offset');
@@ -257,7 +294,13 @@ class TelegramMediaService {
     required int offset,
     required int limit,
     Duration timeout = const Duration(seconds: 30),
-    void Function(DateTime start, DateTime end, int elapsedMs, int activeAtStart)? onMetrics,
+    void Function(
+      DateTime start,
+      DateTime end,
+      int elapsedMs,
+      int activeAtStart,
+    )?
+    onMetrics,
   }) async {
     final ready = await _authService.ensureConnected();
     if (!ready || _authService.client == null) {
@@ -304,7 +347,13 @@ class TelegramMediaService {
     required int offset,
     required int limit,
     required Duration timeout,
-    void Function(DateTime start, DateTime end, int elapsedMs, int activeAtStart)? onMetrics,
+    void Function(
+      DateTime start,
+      DateTime end,
+      int elapsedMs,
+      int activeAtStart,
+    )?
+    onMetrics,
   }) async {
     _activeTelegramRequests++;
     final activeAtStart = _activeTelegramRequests;
@@ -1028,15 +1077,17 @@ class TelegramMediaService {
           }
         } else if (sz is t.PhotoStrippedSize && thumbsDir != null) {
           try {
-            final jpeg = inflateTelegramStrippedThumbnail(sz.bytes);
-            if (jpeg != null) {
-              final placeholderFile = File(
-                '$thumbsDir/${messageId}_placeholder.jpg',
-              );
-              if (!placeholderFile.parent.existsSync()) {
-                placeholderFile.parent.createSync(recursive: true);
+            final placeholderFile = File(
+              '$thumbsDir/${messageId}_placeholder.jpg',
+            );
+            if (!placeholderFile.existsSync()) {
+              final jpeg = inflateTelegramStrippedThumbnail(sz.bytes);
+              if (jpeg != null) {
+                if (!placeholderFile.parent.existsSync()) {
+                  placeholderFile.parent.createSync(recursive: true);
+                }
+                placeholderFile.writeAsBytesSync(jpeg);
               }
-              placeholderFile.writeAsBytesSync(jpeg, flush: true);
             }
           } catch (_) {}
         } else if (sz is t.PhotoCachedSize &&
@@ -1044,10 +1095,12 @@ class TelegramMediaService {
             sz.w >= 120) {
           try {
             final thumbFile = File('$thumbsDir/${messageId}_hq.jpg');
-            if (!thumbFile.parent.existsSync()) {
-              thumbFile.parent.createSync(recursive: true);
+            if (!thumbFile.existsSync()) {
+              if (!thumbFile.parent.existsSync()) {
+                thumbFile.parent.createSync(recursive: true);
+              }
+              thumbFile.writeAsBytesSync(sz.bytes);
             }
-            thumbFile.writeAsBytesSync(sz.bytes, flush: true);
             thumbnailPath = thumbFile.path;
           } catch (_) {}
         }
@@ -1146,24 +1199,28 @@ class TelegramMediaService {
         for (final th in doc.thumbs!) {
           if (th is t.PhotoStrippedSize) {
             try {
-              final jpeg = inflateTelegramStrippedThumbnail(th.bytes);
-              if (jpeg != null) {
-                final placeholderFile = File(
-                  '$thumbsDir/${messageId}_placeholder.jpg',
-                );
-                if (!placeholderFile.parent.existsSync()) {
-                  placeholderFile.parent.createSync(recursive: true);
+              final placeholderFile = File(
+                '$thumbsDir/${messageId}_placeholder.jpg',
+              );
+              if (!placeholderFile.existsSync()) {
+                final jpeg = inflateTelegramStrippedThumbnail(th.bytes);
+                if (jpeg != null) {
+                  if (!placeholderFile.parent.existsSync()) {
+                    placeholderFile.parent.createSync(recursive: true);
+                  }
+                  placeholderFile.writeAsBytesSync(jpeg);
                 }
-                placeholderFile.writeAsBytesSync(jpeg, flush: true);
               }
             } catch (_) {}
           } else if (th is t.PhotoCachedSize && th.w >= 120) {
             try {
               final thumbFile = File('$thumbsDir/${messageId}_hq.jpg');
-              if (!thumbFile.parent.existsSync()) {
-                thumbFile.parent.createSync(recursive: true);
+              if (!thumbFile.existsSync()) {
+                if (!thumbFile.parent.existsSync()) {
+                  thumbFile.parent.createSync(recursive: true);
+                }
+                thumbFile.writeAsBytesSync(th.bytes);
               }
-              thumbFile.writeAsBytesSync(th.bytes, flush: true);
               thumbnailPath = thumbFile.path;
               break;
             } catch (_) {}
