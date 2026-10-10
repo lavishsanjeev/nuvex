@@ -1033,10 +1033,10 @@ void main() {
         await tester.pump();
 
         // Find the grid
-        final gridFinder = find.byType(GridView);
+        final gridFinder = find.byType(SliverGrid);
         expect(gridFinder, findsOneWidget);
 
-        final grid = tester.widget<GridView>(gridFinder);
+        final grid = tester.widget<SliverGrid>(gridFinder);
         final delegate =
             grid.gridDelegate as SliverGridDelegateWithFixedCrossAxisCount;
         expect(delegate.crossAxisCount, equals(4));

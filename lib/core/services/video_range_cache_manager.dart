@@ -95,6 +95,31 @@ class VideoRangeCacheManager {
   int? _currentPrefetchMessageId;
   int? _currentPlayheadChunk;
   final List<Completer<void>> _slotWaiters = [];
+  final List<Completer<void>> _playbackWaiters = [];
+
+  void _notifyPlaybackFinished() {
+    if (_activePlaybackRequests <= 0 && _playbackWaiters.isNotEmpty) {
+      final waiters = List<Completer<void>>.from(_playbackWaiters);
+      _playbackWaiters.clear();
+      for (final w in waiters) {
+        if (!w.isCompleted) w.complete();
+      }
+    }
+  }
+
+  Future<void> _waitForPlaybackSlot() {
+    if (_activePlaybackRequests <= 0) return Future.value();
+    final completer = Completer<void>();
+    _playbackWaiters.add(completer);
+    return completer.future;
+  }
+
+  void _drainPlaybackWaiters() {
+    for (final w in _playbackWaiters) {
+      if (!w.isCompleted) w.complete();
+    }
+    _playbackWaiters.clear();
+  }
 
   // Diagnostics and chunk tracing
   static int _nextRequestId = 0;
@@ -230,33 +255,7 @@ class VideoRangeCacheManager {
         return _memoryChunkCache[dedupeKey]!;
       }
 
-      final chunkFile = await getChunkFile(file.telegramMessageId, chunkIndex);
-
-      // 2. Return from disk cache if non-empty (asynchronous read to never block UI isolate)
-      if (await chunkFile.exists()) {
-        final length = await chunkFile.length();
-        if (length > 0) {
-          chunkTrace.cacheHitMiss = 'DISK_HIT';
-          debugPrint(
-            '[PERF_CACHE] DISK HIT chunk $chunkIndex for #${file.telegramMessageId}',
-          );
-          _knownCachedChunks
-              .putIfAbsent(file.telegramMessageId, () => {})
-              .add(chunkIndex);
-          unawaited(
-            chunkFile.setLastModified(DateTime.now()).catchError((_) {}),
-          );
-          final bytes = await chunkFile.readAsBytes();
-          _putInMemoryCache(dedupeKey, bytes);
-          return bytes;
-        }
-      }
-
-      debugPrint(
-        '[PERF_CACHE] MISS chunk $chunkIndex for #${file.telegramMessageId}',
-      );
-
-      // 3. Deduplicate in-flight concurrent requests for the exact same chunk
+      // 2. Deduplicate in-flight concurrent requests for the exact same chunk
       if (_inFlightChunks.containsKey(dedupeKey)) {
         chunkTrace.wasAlreadyPrefetching = true;
         if (isPlaybackRequest) {
@@ -268,11 +267,10 @@ class VideoRangeCacheManager {
         return await _inFlightChunks[dedupeKey]!;
       }
 
-      chunkTrace.cacheHitMiss = 'MISS';
-      final future = _fetchAndSaveChunk(
+      // Create and record in-flight future synchronously before any async gap
+      final future = _loadOrFetchChunk(
         file: file,
         chunkIndex: chunkIndex,
-        chunkFile: chunkFile,
         mediaService: mediaService,
         timeout: timeout,
         trace: chunkTrace,
@@ -281,11 +279,6 @@ class VideoRangeCacheManager {
 
       try {
         final result = await future;
-        if (result.isNotEmpty) {
-          _knownCachedChunks
-              .putIfAbsent(file.telegramMessageId, () => {})
-              .add(chunkIndex);
-        }
         return result;
       } finally {
         _inFlightChunks.remove(dedupeKey);
@@ -293,8 +286,62 @@ class VideoRangeCacheManager {
     } finally {
       if (isPlaybackRequest) {
         _activePlaybackRequests--;
+        _notifyPlaybackFinished();
+        if (_currentPrefetchMessageId == file.telegramMessageId) {
+          _fillPrefetchPipeline(file, mediaService);
+        }
       }
     }
+  }
+
+  Future<Uint8List> _loadOrFetchChunk({
+    required RemoteFile file,
+    required int chunkIndex,
+    required TelegramMediaService mediaService,
+    required Duration timeout,
+    required ChunkTrace trace,
+  }) async {
+    final dedupeKey = '${file.telegramMessageId}_$chunkIndex';
+    final chunkFile = await getChunkFile(file.telegramMessageId, chunkIndex);
+
+    // Return from disk cache if non-empty (asynchronous read)
+    if (await chunkFile.exists()) {
+      final length = await chunkFile.length();
+      if (length > 0) {
+        trace.cacheHitMiss = 'DISK_HIT';
+        debugPrint(
+          '[PERF_CACHE] DISK HIT chunk $chunkIndex for #${file.telegramMessageId}',
+        );
+        _knownCachedChunks
+            .putIfAbsent(file.telegramMessageId, () => {})
+            .add(chunkIndex);
+        unawaited(chunkFile.setLastModified(DateTime.now()).catchError((_) {}));
+        final bytes = await chunkFile.readAsBytes();
+        _putInMemoryCache(dedupeKey, bytes);
+        return bytes;
+      }
+    }
+
+    debugPrint(
+      '[PERF_CACHE] MISS chunk $chunkIndex for #${file.telegramMessageId}',
+    );
+    trace.cacheHitMiss = 'MISS';
+
+    final result = await _fetchAndSaveChunk(
+      file: file,
+      chunkIndex: chunkIndex,
+      chunkFile: chunkFile,
+      mediaService: mediaService,
+      timeout: timeout,
+      trace: trace,
+    );
+
+    if (result.isNotEmpty) {
+      _knownCachedChunks
+          .putIfAbsent(file.telegramMessageId, () => {})
+          .add(chunkIndex);
+    }
+    return result;
   }
 
   Future<Uint8List> _fetchAndSaveChunk({
@@ -534,12 +581,16 @@ class VideoRangeCacheManager {
     trace.delayedBehindAnotherRequest = delayed;
 
     // Rule 3: Playback requests MUST have higher priority than prefetch.
-    if (hasActivePlaybackRequests) {
+    // Yield while an active playback request is in flight so playback receives 100% priority.
+    while (hasActivePlaybackRequests) {
       debugPrint(
-        '[PERF_PREFETCH] Pausing prefetch chunk $chunkIndex because playback is active',
+        '[PERF_PREFETCH] Pausing prefetch chunk $chunkIndex while playback is active',
       );
-      _activePrefetches.remove(key);
-      return;
+      await _waitForPlaybackSlot();
+      if (_currentPrefetchMessageId != file.telegramMessageId) {
+        _activePrefetches.remove(key);
+        return;
+      }
     }
 
     _activePrefetchWorkers++;
@@ -687,6 +738,7 @@ class VideoRangeCacheManager {
     _currentPlayheadChunk = null;
     _activePrefetches.clear();
     _drainSlotWaiters();
+    _drainPlaybackWaiters();
   }
 
   /// Retrieves an arbitrary byte range [start, end] across cached/downloaded 512 KB chunks.

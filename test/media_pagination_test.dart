@@ -204,17 +204,19 @@ void main() {
         await Future.delayed(const Duration(milliseconds: 100));
         await tester.pump();
 
-        // Verify GridView has 100 items
-        final gridFinder = find.byType(GridView);
+        // Verify SliverGrid has 100 items
+        final gridFinder = find.byType(SliverGrid);
         expect(gridFinder, findsOneWidget);
 
-        final grid = tester.widget<GridView>(gridFinder);
-        final delegate = grid.childrenDelegate as SliverChildBuilderDelegate;
-        print('UI rendered count in GridView: ${delegate.estimatedChildCount}');
+        final grid = tester.widget<SliverGrid>(gridFinder);
+        final delegate = grid.delegate as SliverChildBuilderDelegate;
+        print(
+          'UI rendered count in SliverGrid: ${delegate.estimatedChildCount}',
+        );
         expect(
           delegate.estimatedChildCount,
           100,
-          reason: 'PhotosScreen GridView must have itemCount == 100',
+          reason: 'PhotosScreen SliverGrid must have itemCount == 100',
         );
         print('All 100 photos visible: YES\n');
       });
