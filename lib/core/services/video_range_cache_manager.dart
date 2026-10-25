@@ -660,8 +660,9 @@ class VideoRangeCacheManager {
   bool isChunkCached(int messageId, int chunkIndex) {
     final key = '${messageId}_$chunkIndex';
     if (_memoryChunkCache.containsKey(key)) return true;
-    if (_knownCachedChunks[messageId]?.contains(chunkIndex) ?? false) {
-      return true;
+    final cachedSet = _knownCachedChunks[messageId];
+    if (cachedSet != null) {
+      return cachedSet.contains(chunkIndex);
     }
     if (_resolvedCacheDir != null) {
       final f = File('$_resolvedCacheDir/$messageId/chunk_$chunkIndex.part');

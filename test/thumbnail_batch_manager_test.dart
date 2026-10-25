@@ -360,5 +360,115 @@ void main() {
         manager.dispose();
       },
     );
+
+    test(
+      '8. Fast-path in-memory pre-population via onMediaListUpdated',
+      () async {
+        final manager = ThumbnailBatchManager(
+          repository: fakeRepo,
+          batchSize: 24,
+          maxConcurrent: 6,
+        );
+
+        final files = [
+          createTestFile(601, thumbnailPath: '$thumbsDir/601_hq.jpg'),
+          createTestFile(602, thumbnailPath: '$thumbsDir/602_hq.jpg'),
+          createTestFile(603, thumbnailPath: null),
+        ];
+
+        await manager.onMediaListUpdated(files);
+
+        // Known thumbnail paths should be immediately resolved in memory
+        expect(manager.getNotifier(601).value, equals('$thumbsDir/601_hq.jpg'));
+        expect(manager.getNotifier(602).value, equals('$thumbsDir/602_hq.jpg'));
+        // File without thumbnail starts with null
+        expect(manager.getNotifier(603).value, isNull);
+
+        manager.dispose();
+      },
+    );
+
+    test(
+      '9. Direction-aware prefetching on upward and downward scroll',
+      () async {
+        final manager = ThumbnailBatchManager(
+          repository: fakeRepo,
+          batchSize: 24,
+          maxConcurrent: 6,
+        );
+
+        final files = List.generate(96, (i) => createTestFile(i + 700));
+
+        // Scrolling downwards at index 14 (past midpoint of batch 0)
+        manager.requestBatchForIndex(14, files, scrollDirection: 1);
+        expect(
+          manager.inFlightBatches.contains(1) ||
+              manager.loadedBatches.contains(1),
+          isTrue,
+        );
+
+        // Fast forward to batch 2 (index 50)
+        manager.requestBatch(2, files);
+        manager.updateViewportIndex(50, files);
+
+        // Scrolling upwards at index 50 (indexInBatch 2, scrollDirection -1)
+        manager.requestBatchForIndex(50, files, scrollDirection: -1);
+        expect(
+          manager.inFlightBatches.contains(1) ||
+              manager.loadedBatches.contains(1),
+          isTrue,
+        );
+
+        manager.dispose();
+      },
+    );
+
+    test(
+      '10. Cache invalidation and recovery on corrupted or missing thumbnail',
+      () async {
+        final manager = ThumbnailBatchManager(
+          repository: fakeRepo,
+          batchSize: 24,
+          maxConcurrent: 6,
+        );
+
+        final cachedPath = '$thumbsDir/801_hq.jpg';
+        final file = createTestFile(801, thumbnailPath: cachedPath);
+
+        manager.requestBatch(0, [file]);
+        final notifier = manager.getNotifier(801);
+        expect(notifier.value, equals(cachedPath));
+
+        // Invalidate on error detection
+        manager.invalidateThumbnail(801);
+        expect(notifier.value, isNull);
+
+        manager.dispose();
+      },
+    );
+
+    test(
+      '11. Safe disposal cancels timers and prevents stale callbacks',
+      () async {
+        fakeRepo.simulatedLatency = const Duration(milliseconds: 100);
+        final manager = ThumbnailBatchManager(
+          repository: fakeRepo,
+          batchSize: 24,
+          maxConcurrent: 2,
+        );
+
+        final files = List.generate(24, (i) => createTestFile(i + 900));
+        manager.requestBatch(0, files);
+        expect(manager.queueLength, greaterThan(0));
+
+        // Dispose while requests are actively in-flight
+        manager.dispose();
+
+        // State is cleanly cleared
+        expect(manager.queueLength, equals(0));
+        // Waiting for asynchronous latency does not throw or corrupt state
+        await Future.delayed(const Duration(milliseconds: 150));
+      },
+    );
   });
 }

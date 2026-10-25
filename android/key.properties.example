@@ -1,0 +1,8 @@
+# Example Android Keystore Configuration for Nuvex Release Signing
+# Copy this file to android/key.properties and replace with your actual values.
+# IMPORTANT: Never commit your actual key.properties or .jks/.keystore files to Git!
+
+storePassword=YOUR_KEYSTORE_PASSWORD
+keyPassword=YOUR_KEY_PASSWORD
+keyAlias=nuvex-release-key
+storeFile=C:\\path\\to\\your\\upload-keystore.jks

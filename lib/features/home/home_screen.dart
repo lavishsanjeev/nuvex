@@ -15,11 +15,19 @@ import 'widgets/nuvex_bottom_bar.dart';
 /// Contains strictly two navigation destinations:
 /// 1. Photos (PhotosScreen)
 /// 2. Collections (CollectionsScreen)
+import '../../core/services/app_update_service.dart';
+
 class HomeScreen extends StatefulWidget {
   final AuthController? controller;
   final MediaController? mediaController;
+  final bool enableUpdateCheck;
 
-  const HomeScreen({super.key, this.controller, this.mediaController});
+  const HomeScreen({
+    super.key,
+    this.controller,
+    this.mediaController,
+    this.enableUpdateCheck = true,
+  });
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -43,6 +51,12 @@ class _HomeScreenState extends State<HomeScreen> {
                 )
               : null,
         );
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && widget.enableUpdateCheck) {
+        AppUpdateService().checkAndShowPrompt(context);
+      }
+    });
   }
 
   @override

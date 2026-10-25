@@ -414,9 +414,7 @@ class VideoStreamingProxy {
           final bytes = await raf.read(toRead);
           if (bytes.isEmpty) break;
 
-          debugPrint(
-            '[STREAM_CHUNK_WRITE] Local file: ${bytes.length} bytes (remaining: ${remaining - bytes.length})',
-          );
+          // [STREAM_CHUNK_WRITE] high-frequency per-chunk log omitted for UI performance
           response.add(bytes);
 
           if (firstChunk) {
@@ -560,9 +558,7 @@ class VideoStreamingProxy {
 
         if (sliceStart < sliceEnd && sliceStart < chunk.length) {
           final slice = chunk.sublist(sliceStart, sliceEnd);
-          debugPrint(
-            '[STREAM_CHUNK_WRITE] Writing chunk $c: ${slice.length} bytes (slice: $sliceStart-$sliceEnd)',
-          );
+          // [STREAM_CHUNK_WRITE] high-frequency slice log omitted for UI performance
 
           response.add(slice);
           try {

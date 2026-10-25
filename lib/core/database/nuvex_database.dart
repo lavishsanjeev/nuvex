@@ -328,7 +328,7 @@ class NuvexDatabase {
     final database = db;
     final rows = await database.query(
       'remote_files',
-      where: 'category IN (?, ?, ?) AND isTrashed = 0',
+      where: 'category IN (?, ?, ?) AND isTrashed = 0 AND isLocked = 0',
       whereArgs: ['photos', 'videos', 'screenshots'],
       orderBy: 'createdAt DESC',
       limit: limit,
@@ -365,7 +365,7 @@ class NuvexDatabase {
     if (category == 'largest_files') {
       final rows = await database.query(
         'remote_files',
-        where: 'isTrashed = 0',
+        where: 'isTrashed = 0 AND isLocked = 0',
         orderBy: 'sizeBytes DESC',
         limit: limit,
         offset: offset,
@@ -379,7 +379,7 @@ class NuvexDatabase {
           .millisecondsSinceEpoch;
       final rows = await database.query(
         'remote_files',
-        where: 'createdAt >= ? AND isTrashed = 0',
+        where: 'createdAt >= ? AND isTrashed = 0 AND isLocked = 0',
         whereArgs: [cutoff],
         orderBy: 'createdAt DESC',
         limit: limit,
@@ -391,7 +391,7 @@ class NuvexDatabase {
     if (category == 'archive') {
       final rows = await database.query(
         'remote_files',
-        where: 'isArchived = 1 AND isTrashed = 0',
+        where: 'isArchived = 1 AND isTrashed = 0 AND isLocked = 0',
         orderBy: 'createdAt DESC',
         limit: limit,
         offset: offset,
@@ -413,7 +413,7 @@ class NuvexDatabase {
     if (category == 'favorites') {
       final rows = await database.query(
         'remote_files',
-        where: 'isFavorite = 1 AND isTrashed = 0',
+        where: 'isFavorite = 1 AND isTrashed = 0 AND isLocked = 0',
         orderBy: 'createdAt DESC',
         limit: limit,
         offset: offset,
@@ -425,7 +425,7 @@ class NuvexDatabase {
       final rows = await database.query(
         'remote_files',
         where:
-            'latitude IS NOT NULL AND longitude IS NOT NULL AND isTrashed = 0',
+            'latitude IS NOT NULL AND longitude IS NOT NULL AND isTrashed = 0 AND isLocked = 0',
         orderBy: 'createdAt DESC',
         limit: limit,
         offset: offset,
@@ -436,7 +436,7 @@ class NuvexDatabase {
     if (category == 'moments') {
       final explicit = await database.query(
         'remote_files',
-        where: "category = 'moments' AND isTrashed = 0",
+        where: "category = 'moments' AND isTrashed = 0 AND isLocked = 0",
         orderBy: 'createdAt DESC',
         limit: limit,
         offset: offset,
@@ -449,7 +449,7 @@ class NuvexDatabase {
 
     final rows = await database.query(
       'remote_files',
-      where: 'category = ? AND isTrashed = 0',
+      where: 'category = ? AND isTrashed = 0 AND isLocked = 0',
       whereArgs: [category],
       orderBy: 'createdAt DESC',
       limit: limit,
@@ -564,7 +564,7 @@ class NuvexDatabase {
       }
       final explicitFiles = await database.query(
         'remote_files',
-        where: "category = 'moments' AND isTrashed = 0",
+        where: "category = 'moments' AND isTrashed = 0 AND isLocked = 0",
         orderBy: 'createdAt DESC',
         limit: 1,
       );
@@ -611,7 +611,7 @@ class NuvexDatabase {
     final rows = await database.rawQuery('''
       SELECT category, COUNT(*) as count 
       FROM remote_files 
-      WHERE isTrashed = 0
+      WHERE isTrashed = 0 AND isLocked = 0
       GROUP BY category
     ''');
 
@@ -631,12 +631,12 @@ class NuvexDatabase {
     final aggregateRes = await database.rawQuery(
       '''
       SELECT 
-        SUM(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL AND isTrashed = 0 THEN 1 ELSE 0 END) as places_count,
-        SUM(CASE WHEN category = 'moments' AND isTrashed = 0 THEN 1 ELSE 0 END) as moments_count,
-        SUM(CASE WHEN createdAt >= ? AND isTrashed = 0 THEN 1 ELSE 0 END) as recent_count,
-        SUM(CASE WHEN isArchived = 1 AND isTrashed = 0 THEN 1 ELSE 0 END) as archive_count,
+        SUM(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL AND isTrashed = 0 AND isLocked = 0 THEN 1 ELSE 0 END) as places_count,
+        SUM(CASE WHEN category = 'moments' AND isTrashed = 0 AND isLocked = 0 THEN 1 ELSE 0 END) as moments_count,
+        SUM(CASE WHEN createdAt >= ? AND isTrashed = 0 AND isLocked = 0 THEN 1 ELSE 0 END) as recent_count,
+        SUM(CASE WHEN isArchived = 1 AND isTrashed = 0 AND isLocked = 0 THEN 1 ELSE 0 END) as archive_count,
         SUM(CASE WHEN isLocked = 1 AND isTrashed = 0 THEN 1 ELSE 0 END) as locked_count,
-        SUM(CASE WHEN isFavorite = 1 AND isTrashed = 0 THEN 1 ELSE 0 END) as fav_count,
+        SUM(CASE WHEN isFavorite = 1 AND isTrashed = 0 AND isLocked = 0 THEN 1 ELSE 0 END) as fav_count,
         SUM(CASE WHEN isTrashed = 1 THEN 1 ELSE 0 END) as trash_count
       FROM remote_files
     ''',
@@ -698,6 +698,33 @@ class NuvexDatabase {
     );
   }
 
+  /// Updates the lock state of a media record directly in SQLite.
+  /// Bypasses upsert conflict resolution so that restore operations reliably set isLocked = 0.
+  Future<void> updateFileLockState(
+    int telegramMessageId, {
+    required bool isLocked,
+    String? localPath,
+    String? thumbnailPath,
+  }) async {
+    final database = db;
+    final Map<String, dynamic> values = {
+      'isLocked': isLocked ? 1 : 0,
+      'modifiedAt': DateTime.now().millisecondsSinceEpoch,
+    };
+    if (localPath != null) {
+      values['localPath'] = localPath;
+    }
+    if (thumbnailPath != null) {
+      values['thumbnailPath'] = thumbnailPath;
+    }
+    await database.update(
+      'remote_files',
+      values,
+      where: 'telegramMessageId = ?',
+      whereArgs: [telegramMessageId],
+    );
+  }
+
   /// Retrieves trashed media records ordered by deletion timestamp descending.
   Future<List<RemoteFile>> getTrashedMedia({int? limit, int offset = 0}) async {
     final database = db;
@@ -750,7 +777,7 @@ class NuvexDatabase {
     final rows = await database.rawQuery('''
       SELECT category, COUNT(*) as file_count, SUM(sizeBytes) as total_bytes
       FROM remote_files
-      WHERE isTrashed = 0
+      WHERE isTrashed = 0 AND isLocked = 0
       GROUP BY category
     ''');
 

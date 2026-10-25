@@ -5,6 +5,9 @@ import 'package:flutter/foundation.dart';
 
 import '../../../core/database/remote_file.dart';
 import '../../../core/services/native_media_service.dart';
+import '../../locked_folder/controllers/locked_folder_controller.dart';
+import '../../locked_folder/repositories/locked_folder_repository.dart';
+import '../../locked_folder/services/locked_folder_auth_service.dart';
 import '../models/collection_preview.dart';
 import '../repositories/media_repository.dart';
 import '../services/collection_thumbnail_resolver.dart';
@@ -39,11 +42,15 @@ class MediaController extends ChangeNotifier {
   factory MediaController({
     MediaRepository? repository,
     UploadController? uploadController,
+    LockedFolderController? lockedFolderController,
   }) {
-    if (repository != null || uploadController != null) {
+    if (repository != null ||
+        uploadController != null ||
+        lockedFolderController != null) {
       return MediaController._internal(
         repository: repository,
         uploadController: uploadController,
+        lockedFolderController: lockedFolderController,
       );
     }
     return _instance;
@@ -51,6 +58,7 @@ class MediaController extends ChangeNotifier {
   MediaController._internal({
     MediaRepository? repository,
     UploadController? uploadController,
+    LockedFolderController? lockedFolderController,
   }) : _repository = repository ?? MediaRepository() {
     _uploadController =
         uploadController ??
@@ -59,13 +67,24 @@ class MediaController extends ChangeNotifier {
           onUploadCompleted: _onUploadCompleted,
         );
     _uploadController.addListener(_onUploadQueueChanged);
+    _lockedFolderController =
+        lockedFolderController ??
+        LockedFolderController(
+          authService: LockedFolderAuthService(),
+          repository: LockedFolderRepository(
+            database: _repository.database,
+            mediaRepository: _repository,
+          ),
+        );
   }
 
   final MediaRepository _repository;
   late final UploadController _uploadController;
+  late final LockedFolderController _lockedFolderController;
 
   MediaRepository get repository => _repository;
   UploadController get uploadController => _uploadController;
+  LockedFolderController get lockedFolderController => _lockedFolderController;
 
   void _onUploadCompleted(RemoteFile remoteFile) async {
     final idx = _recentMedia.indexWhere(
@@ -113,7 +132,7 @@ class MediaController extends ChangeNotifier {
   bool _isSyncing = false;
   DateTime? _lastSyncTime;
 
-  // ── Batch Thumbnail Loading Manager ──
+  // â”€â”€ Batch Thumbnail Loading Manager â”€â”€
   late final ThumbnailBatchManager _batchManager = ThumbnailBatchManager(
     repository: _repository,
     batchSize: 24,
@@ -140,11 +159,15 @@ class MediaController extends ChangeNotifier {
   }) => _batchManager.getNotifier(messageId, initialPath: initialPath);
 
   /// Requests loading and caching of thumbnails in batches of ~24 items.
-  void requestThumbnailBatchForIndex(int index) {
-    _batchManager.requestBatchForIndex(index, _recentMedia);
+  void requestThumbnailBatchForIndex(int index, {int scrollDirection = 0}) {
+    _batchManager.requestBatchForIndex(
+      index,
+      _recentMedia,
+      scrollDirection: scrollDirection,
+    );
   }
 
-  // ── Multi-Select Mode State ──
+  // â”€â”€ Multi-Select Mode State â”€â”€
   bool _isSelectionMode = false;
   final Set<int> _selectedMessageIds = {};
 
@@ -178,6 +201,11 @@ class MediaController extends ChangeNotifier {
   void selectAll([List<RemoteFile>? files]) {
     final targets = files ?? _recentMedia;
     _selectedMessageIds.addAll(targets.map((f) => f.telegramMessageId));
+    notifyListeners();
+  }
+
+  void deselectAll() {
+    _selectedMessageIds.clear();
     notifyListeners();
   }
 
@@ -345,18 +373,24 @@ class MediaController extends ChangeNotifier {
       debugPrint(
         '[CONTROLLER_DIAGNOSTIC] [Stage 7] Loaded ${_recentMedia.length} media items into active gallery state',
       );
+    } on SocketException catch (e) {
+      debugPrint('[MEDIA] Sync network error: $e');
+      if (_recentMedia.isEmpty) {
+        _status = MediaLoadingStatus.error;
+        _errorMessage = 'Unable to connect to cloud storage. Please check your internet connection.';
+      }
     } on TimeoutException catch (e) {
       debugPrint('[MEDIA] Sync timeout: $e');
       if (_recentMedia.isEmpty) {
         _status = MediaLoadingStatus.error;
-        _errorMessage = 'Connection timed out while syncing with Telegram. Please tap retry.';
+        _errorMessage = 'Connection timed out while syncing. Please tap retry.';
       }
     } catch (e) {
       debugPrint('[MEDIA] Sync error: $e');
       if (_recentMedia.isEmpty) {
         _status = MediaLoadingStatus.error;
         _errorMessage =
-            'Unable to sync with Telegram: ${e.toString().replaceAll('Exception: ', '')}';
+            'Unable to sync: ${e.toString().replaceAll('Exception: ', '')}';
       }
     } finally {
       _isSyncing = false;
@@ -374,8 +408,18 @@ class MediaController extends ChangeNotifier {
     }
   }
 
-  /// Retries syncing after an error.
-  Future<void> retry() => syncMedia(isRetry: true);
+  DateTime? _lastRetryTime;
+
+  /// Retries syncing after an error with a cooldown to prevent tight retry loops.
+  Future<void> retry() {
+    final now = DateTime.now();
+    if (_lastRetryTime != null &&
+        now.difference(_lastRetryTime!).inMilliseconds < 1500) {
+      return Future.value();
+    }
+    _lastRetryTime = now;
+    return syncMedia(isRetry: true);
+  }
 
   /// Downloads and caches a media file on demand, updating local state.
   Future<RemoteFile> downloadFile(
@@ -460,6 +504,64 @@ class MediaController extends ChangeNotifier {
     } catch (_) {}
   }
 
+  /// Refreshes the gallery immediately after one or more files are restored from the Locked Folder.
+  ///
+  /// - Reads fresh SQLite cache including the restored items (now having isLocked = 0).
+  /// - Updates thumbnail notifiers so MediaTile instances immediately render the restored thumbnail.
+  /// - Triggers background thumbnail generation if needed.
+  /// - Notifies all gallery listeners without requiring an app restart.
+  Future<void> refreshAfterLockedFolderRestore({
+    List<RemoteFile>? restoredFiles,
+  }) async {
+    try {
+      final cached = await _repository.getCachedRecentMedia(limit: null);
+      final counts = await _repository.getCachedCollectionCounts();
+
+      _recentMedia = cached;
+      _collectionCounts = counts;
+
+      // Update thumbnail notifiers for the restored items
+      if (restoredFiles != null && restoredFiles.isNotEmpty) {
+        for (final file in restoredFiles) {
+          final thumb = file.thumbnailPath ??
+              (!file.isVideo && file.localPath != null ? file.localPath : null);
+          if (thumb != null && thumb.isNotEmpty) {
+            _batchManager.getNotifier(file.telegramMessageId).value = thumb;
+            _onThumbnailLoaded(file.telegramMessageId, thumb);
+          } else {
+            // Ensure thumbnail exists in background
+            unawaited(_repository.ensureThumbnailAvailable(file).then((updated) {
+              if (updated.thumbnailPath != null) {
+                _batchManager.getNotifier(file.telegramMessageId).value =
+                    updated.thumbnailPath;
+                _onThumbnailLoaded(
+                  file.telegramMessageId,
+                  updated.thumbnailPath!,
+                );
+              }
+            }));
+          }
+        }
+      } else {
+        // Also ensure any restored items in _recentMedia have their thumbnails linked
+        for (final file in _recentMedia) {
+          if (file.thumbnailPath != null && file.thumbnailPath!.isNotEmpty) {
+            _batchManager.getNotifier(file.telegramMessageId).value =
+                file.thumbnailPath;
+          }
+        }
+      }
+
+      try {
+        await loadCollectionThumbnails(autoFetch: false);
+      } catch (_) {}
+
+      notifyListeners();
+    } catch (e) {
+      debugPrint('[MEDIA] Error refreshing after locked folder restore: $e');
+    }
+  }
+
   /// Permanently deletes media from Telegram, local cache, and SQLite database.
   Future<void> permanentlyDeleteMedia(RemoteFile file) async {
     await _repository.permanentlyDeleteMedia(file);
@@ -500,7 +602,7 @@ class MediaController extends ChangeNotifier {
     return cleaned;
   }
 
-  // ── Multi-Select Bulk Actions ──
+  // â”€â”€ Multi-Select Bulk Actions â”€â”€
 
   /// Bulk moves selected files to trash.
   /// Automatically exits selection mode upon completion.
@@ -667,6 +769,42 @@ class MediaController extends ChangeNotifier {
 
     exitSelectionMode();
     return allSuccess;
+  }
+
+  /// Bulk moves selected files to the secure Locked Folder.
+  /// Automatically exits selection mode upon completion.
+  Future<int> moveSelectedToLockedFolder(Uint8List masterKey) async {
+    final targets = selectedFiles;
+    if (targets.isEmpty) {
+      exitSelectionMode();
+      return 0;
+    }
+
+    int count = 0;
+    for (final file in targets) {
+      try {
+        await _lockedFolderController.repository.moveToLockedFolder(
+          file: file,
+          masterKey: masterKey,
+        );
+        _recentMedia.removeWhere(
+          (f) => f.telegramMessageId == file.telegramMessageId,
+        );
+        count++;
+      } catch (e) {
+        debugPrint(
+          '[MEDIA] Error moving #${file.telegramMessageId} to locked folder: $e',
+        );
+      }
+    }
+
+    try {
+      _collectionCounts = await _repository.getCachedCollectionCounts();
+    } catch (_) {}
+
+    exitSelectionMode();
+    notifyListeners();
+    return count;
   }
 
   @override

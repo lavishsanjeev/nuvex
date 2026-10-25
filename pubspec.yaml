@@ -46,6 +46,8 @@ dependencies:
   path_provider: ^2.1.5
   video_player: ^2.9.2
   crypto: ^3.0.3
+  local_auth: ^3.0.2
+  pointycastle: ^4.0.0
 
 dev_dependencies:
   flutter_test:
@@ -80,6 +82,8 @@ flutter_launcher_icons:
   ios: true
   image_path: "assets/icon/applogo.png"
   min_sdk_android: 21
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/icon/applogo.png"
   web:
     generate: true
     image_path: "assets/icon/applogo.png"

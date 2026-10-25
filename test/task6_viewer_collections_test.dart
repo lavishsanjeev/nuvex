@@ -377,7 +377,6 @@ void main() {
           category: 'photos',
           latitude: 40.7128,
           longitude: -74.0060,
-          isLocked: true,
         ),
         RemoteFile(
           id: 106,
@@ -390,6 +389,19 @@ void main() {
           createdAt: now.subtract(const Duration(days: 10)),
           modifiedAt: now.subtract(const Duration(days: 10)),
           category: 'stickers',
+        ),
+        RemoteFile(
+          id: 107,
+          telegramChatId: 0,
+          telegramMessageId: 107,
+          telegramFileId: 107,
+          name: 'vault_secret.jpg',
+          mimeType: 'image/jpeg',
+          sizeBytes: 880000,
+          createdAt: now.subtract(const Duration(days: 8)),
+          modifiedAt: now.subtract(const Duration(days: 8)),
+          category: 'photos',
+          isLocked: true,
         ),
       ];
 
@@ -451,7 +463,7 @@ void main() {
     test('getFilesByCategory filters locked based on metadata', () async {
       final locked = await nuvexDb.getFilesByCategory('locked');
       expect(locked.length, 1);
-      expect(locked.first.name, 'pin_location.jpg');
+      expect(locked.first.name, 'vault_secret.jpg');
     });
 
     test('getFilesByCategory filters places based on coordinates', () async {

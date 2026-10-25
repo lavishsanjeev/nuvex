@@ -12,14 +12,14 @@ import android.os.Environment
 import android.provider.MediaStore
 import androidx.annotation.NonNull
 import androidx.core.content.FileProvider
-import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 
-class MainActivity : FlutterActivity() {
+class MainActivity : FlutterFragmentActivity() {
     private val CHANNEL = "nuvex/native_media"
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
@@ -211,6 +211,23 @@ class MainActivity : FlutterActivity() {
                         result.success(savedPath)
                     } catch (e: Exception) {
                         result.error("SAVE_FAILED", e.localizedMessage, null)
+                    }
+                }
+
+                "openUrl" -> {
+                    val urlString = call.argument<String>("url")
+                    if (urlString.isNullOrBlank()) {
+                        result.error("INVALID_ARGS", "url must not be null or blank", null)
+                        return@setMethodCallHandler
+                    }
+                    try {
+                        val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(urlString)).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        startActivity(browserIntent)
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("LAUNCH_FAILED", e.localizedMessage, null)
                     }
                 }
 

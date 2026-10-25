@@ -287,6 +287,12 @@ class TelegramAuthService {
 
           restoredSessionValid = true;
           debugPrint('[AUTH] restored session verified successfully');
+        } on SocketException {
+          // Network is unreachable; preserve session key and report network failure
+          rethrow;
+        } on TimeoutException {
+          // Network timed out; preserve session key
+          rethrow;
         } catch (e) {
           debugPrint(
             '[AUTH] saved session key rejected/invalid ($e), generating fresh Diffie-Hellman key...',
@@ -379,7 +385,7 @@ class TelegramAuthService {
       _isConnected = false;
       debugPrint('[AUTH] connection failed: SocketException');
       return TelegramConnectionResult.failure(
-        'Unable to reach Telegram servers. Please check your internet connection.',
+        'Unable to reach network. Please check your internet connection.',
       );
     } on TimeoutException {
       _isConnected = false;

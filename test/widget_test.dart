@@ -473,7 +473,7 @@ void main() {
       expect(find.text('Recently added'), findsOneWidget);
       expect(find.text('Creations'), findsOneWidget);
       expect(find.text('Archive'), findsOneWidget);
-      expect(find.text('Locked'), findsOneWidget);
+      expect(find.text('Locked Folder'), findsOneWidget);
 
       // Tap Photos in bottom nav to switch back
       await tester.tap(find.text('Photos'));

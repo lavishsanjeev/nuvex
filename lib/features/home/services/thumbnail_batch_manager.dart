@@ -52,6 +52,7 @@ class ThumbnailBatchManager {
   // ── State ──
   int _activeRequests = 0;
   int _currentVisibleBatch = 0;
+  bool _isDisposed = false;
   String? _thumbsDir;
 
   final List<_ThumbnailQueueItem> _queue = [];
@@ -76,82 +77,102 @@ class ThumbnailBatchManager {
   /// Retrieves or creates a granular [ValueNotifier] for a specific media item.
   /// Allows individual tiles to rebuild when their thumbnail arrives without rebuilding the grid.
   ValueNotifier<String?> getNotifier(int messageId, {String? initialPath}) {
+    final cached = _resolvedCachedPaths[messageId] ?? initialPath;
     var notifier = _notifiers[messageId];
     if (notifier == null) {
-      notifier = ValueNotifier<String?>(initialPath);
+      notifier = ValueNotifier<String?>(cached);
       _notifiers[messageId] = notifier;
-    } else if (initialPath != null && notifier.value == null) {
-      notifier.value = initialPath;
+    } else if (cached != null && notifier.value == null) {
+      notifier.value = cached;
     }
     return notifier;
   }
 
   final Map<int, String> _resolvedCachedPaths = {};
 
-  /// Fast-checks if a thumbnail is already available on disk or in memory.
-  bool isFileCached(RemoteFile file) {
-    if (_resolvedCachedPaths.containsKey(file.telegramMessageId)) return true;
-    return _resolveCachedPath(file) != null;
-  }
+  /// Checks the in-memory cache first, then validates disk paths asynchronously.
+  /// This method is non-blocking: synchronous filesystem calls on the UI isolate
+  /// are avoided to eliminate scroll jank.
+  Future<bool> isFileCached(RemoteFile file) async =>
+      await _resolveCachedPath(file) != null;
 
-  String? _resolveCachedPath(RemoteFile file) {
+  Future<String?> _resolveCachedPath(RemoteFile file) async {
     final msgId = file.telegramMessageId;
     final inMemory = _resolvedCachedPaths[msgId];
     if (inMemory != null) return inMemory;
 
-    if (file.thumbnailPath != null && file.thumbnailPath!.isNotEmpty) {
-      _resolvedCachedPaths[msgId] = file.thumbnailPath!;
-      return file.thumbnailPath;
+    final databasePath = file.thumbnailPath;
+    if (databasePath != null && databasePath.isNotEmpty) {
+      try {
+        final cachedFile = File(databasePath);
+        if (await cachedFile.exists() && await cachedFile.length() > 0) {
+          _resolvedCachedPaths[msgId] = databasePath;
+          return databasePath;
+        }
+      } catch (_) {
+        // Treat unreadable/stale cache entries as misses and fetch again.
+      }
     }
+
     if (_thumbsDir != null) {
       final targetPath = '$_thumbsDir/${file.telegramMessageId}_hq.jpg';
-      final target = File(targetPath);
-      if (isValidHqThumbnail(target)) {
+      if (await isValidHqThumbnailAsync(File(targetPath))) {
         _resolvedCachedPaths[msgId] = targetPath;
-        markThumbnailAsValidated(targetPath);
         return targetPath;
       }
     }
+
     if (!file.isVideo && file.localPath != null && file.localPath!.isNotEmpty) {
-      final f = File(file.localPath!);
-      if (f.existsSync() && f.lengthSync() > 0) {
-        _resolvedCachedPaths[msgId] = file.localPath!;
-        return file.localPath;
+      try {
+        final localFile = File(file.localPath!);
+        if (await localFile.exists() && await localFile.length() > 0) {
+          _resolvedCachedPaths[msgId] = file.localPath!;
+          return file.localPath;
+        }
+      } catch (_) {
+        // Treat inaccessible local media as a cache miss.
       }
     }
     return null;
   }
 
-  /// Initializes the thumbnails directory path and pre-seeds cached notifiers in memory.
+  /// Invalidates cached path and state for a file if its thumbnail failed to load on-screen.
+  void invalidateThumbnail(int messageId) {
+    _resolvedCachedPaths.remove(messageId);
+    _completedIds.remove(messageId);
+    final notifier = _notifiers[messageId];
+    if (notifier != null) {
+      notifier.value = null;
+    }
+  }
+
+  /// Initializes the thumbnail directory and in-memory cache index.
+  /// Fast in-memory registration avoids disk round trips for known records.
   Future<void> onMediaListUpdated(List<RemoteFile> allFiles) async {
     _thumbsDir = await _repository.getThumbsDirectory();
 
-    // Fast memory seeding: pre-seed notifiers with already known paths without blocking disk I/O
+    // Fast in-memory indexing of already-resolved thumbnail paths from SQLite records
     for (final file in allFiles) {
-      final msgId = file.telegramMessageId;
-      if (file.thumbnailPath != null && file.thumbnailPath!.isNotEmpty) {
-        _resolvedCachedPaths[msgId] = file.thumbnailPath!;
-        _completedIds.add(msgId);
-        final notifier = _notifiers[msgId];
-        if (notifier != null) {
-          if (notifier.value != file.thumbnailPath) {
-            notifier.value = file.thumbnailPath;
-          }
-        } else {
-          _notifiers[msgId] = ValueNotifier<String?>(file.thumbnailPath);
-        }
+      final path = file.thumbnailPath;
+      if (path != null && path.isNotEmpty) {
+        _resolvedCachedPaths[file.telegramMessageId] = path;
+        _completedIds.add(file.telegramMessageId);
       }
     }
 
-    // Trigger batch 0 and prefetch batch 1 if items exist
+    // Trigger batch 0 and prefetch batch 1 if items exist.
     if (allFiles.isNotEmpty) {
       requestBatchForIndex(0, allFiles);
     }
   }
 
   /// Called by the grid item builder or scroll listener when index is reached.
-  void requestBatchForIndex(int index, List<RemoteFile> allFiles) {
-    if (allFiles.isEmpty) return;
+  void requestBatchForIndex(
+    int index,
+    List<RemoteFile> allFiles, {
+    int scrollDirection = 0,
+  }) {
+    if (_isDisposed || allFiles.isEmpty) return;
 
     final batchIndex = index ~/ batchSize;
     updateViewportIndex(index, allFiles);
@@ -159,13 +180,22 @@ class ThumbnailBatchManager {
     // Request the visible batch
     requestBatch(batchIndex, allFiles);
 
-    // Approach detection: prefetch next batch if user is past midpoint of current batch
+    // Direction-aware approach detection & prefetching
     final indexInBatch = index % batchSize;
-    if (indexInBatch >= 12 || batchIndex == 0) {
-      final nextBatch = batchIndex + 1;
-      final maxBatch = (allFiles.length - 1) ~/ batchSize;
-      if (nextBatch <= maxBatch) {
-        requestBatch(nextBatch, allFiles);
+    final maxBatch = (allFiles.length - 1) ~/ batchSize;
+
+    if (scrollDirection >= 0) {
+      // Forward / down scroll: prefetch next batch
+      if (indexInBatch >= 12 || batchIndex == 0) {
+        final nextBatch = batchIndex + 1;
+        if (nextBatch <= maxBatch) {
+          requestBatch(nextBatch, allFiles);
+        }
+      }
+    } else {
+      // Backward / up scroll: prefetch previous batch
+      if (indexInBatch < 12 && batchIndex > 0) {
+        requestBatch(batchIndex - 1, allFiles);
       }
     }
   }
@@ -181,38 +211,37 @@ class ThumbnailBatchManager {
 
   /// Requests processing of a specific batch index.
   void requestBatch(int batchIndex, List<RemoteFile> allFiles) {
-    if (_loadedBatches.contains(batchIndex) ||
+    if (_isDisposed ||
+        _loadedBatches.contains(batchIndex) ||
         _inFlightBatches.contains(batchIndex)) {
       return;
     }
-
     final start = batchIndex * batchSize;
     if (start >= allFiles.length) return;
-    final end = min(start + batchSize, allFiles.length);
 
+    final end = min(start + batchSize, allFiles.length);
     debugPrint('[THUMBNAIL] batch start: $start-$end');
-    _inFlightBatches.add(batchIndex);
 
     final batchFiles = allFiles.sublist(start, end);
     bool allAlreadyCached = true;
 
     for (final file in batchFiles) {
       final msgId = file.telegramMessageId;
-      final cachedPath = _resolveCachedPath(file);
+      final cachedPath =
+          _resolvedCachedPaths[msgId] ??
+          (file.thumbnailPath != null && file.thumbnailPath!.isNotEmpty
+              ? file.thumbnailPath
+              : null);
 
       if (cachedPath != null) {
-        debugPrint('[THUMBNAIL] cache hit: $msgId');
+        _resolvedCachedPaths[msgId] = cachedPath;
         _completedIds.add(msgId);
         final notifier = getNotifier(msgId, initialPath: cachedPath);
-        if (notifier.value != cachedPath) {
-          notifier.value = cachedPath;
-        }
+        if (notifier.value != cachedPath) notifier.value = cachedPath;
         continue;
       }
 
       allAlreadyCached = false;
-
-      // Deduplicate: avoid re-queueing if already queued or in-flight
       if (_queuedIds.contains(msgId) ||
           _inFlightDownloads.containsKey(msgId) ||
           _completedIds.contains(msgId)) {
@@ -232,12 +261,12 @@ class ThumbnailBatchManager {
     }
 
     debugPrint('[THUMBNAIL] queue size: ${_queue.length}');
-
     if (allAlreadyCached) {
-      _inFlightBatches.remove(batchIndex);
       _loadedBatches.add(batchIndex);
+      _inFlightBatches.remove(batchIndex);
       debugPrint('[THUMBNAIL] batch complete: $start-$end');
     } else {
+      _inFlightBatches.add(batchIndex);
       _pumpQueue();
     }
   }
@@ -253,15 +282,23 @@ class ThumbnailBatchManager {
   /// Dispatches pending requests up to [maxConcurrent].
   void _pumpQueue() {
     // Evict items that scrolled far outside viewport (> 2 batches away) during fast flings
-    _queue.removeWhere((item) {
-      if ((item.batchIndex - _currentVisibleBatch).abs() > 2) {
+    if (_isDisposed) return;
+    final evicted = _queue
+        .where((item) => (item.batchIndex - _currentVisibleBatch).abs() > 2)
+        .toList(growable: false);
+    if (evicted.isNotEmpty) {
+      _queue.removeWhere(
+        (item) => (item.batchIndex - _currentVisibleBatch).abs() > 2,
+      );
+      for (final item in evicted) {
         _queuedIds.remove(item.file.telegramMessageId);
-        return true;
+        _checkBatchCompletion(item.batchIndex, item.allFiles);
       }
-      return false;
-    });
+    }
 
-    while (_activeRequests < maxConcurrent && _queue.isNotEmpty) {
+    while (!_isDisposed &&
+        _activeRequests < maxConcurrent &&
+        _queue.isNotEmpty) {
       final item = _queue.removeAt(0);
       _queuedIds.remove(item.file.telegramMessageId);
 
@@ -281,24 +318,26 @@ class ThumbnailBatchManager {
 
       future
           .then((updated) {
-            _activeRequests--;
+            _activeRequests = max(0, _activeRequests - 1);
             _inFlightDownloads.remove(item.file.telegramMessageId);
-            _completedIds.add(item.file.telegramMessageId);
+            if (_isDisposed) return;
+
+            final thumbnailPath = updated.thumbnailPath;
+            if (thumbnailPath != null && thumbnailPath.isNotEmpty) {
+              _completedIds.add(item.file.telegramMessageId);
+            }
 
             debugPrint('[THUMBNAIL] complete: ${item.file.telegramMessageId}');
             debugPrint('[THUMBNAIL] active requests: $_activeRequests');
 
-            if (updated.thumbnailPath != null &&
-                updated.thumbnailPath!.isNotEmpty) {
-              _resolvedCachedPaths[item.file.telegramMessageId] =
-                  updated.thumbnailPath!;
-              markThumbnailAsValidated(updated.thumbnailPath!);
-              getNotifier(item.file.telegramMessageId).value =
-                  updated.thumbnailPath;
+            if (thumbnailPath != null && thumbnailPath.isNotEmpty) {
+              _resolvedCachedPaths[item.file.telegramMessageId] = thumbnailPath;
+              markThumbnailAsValidated(thumbnailPath);
+              getNotifier(item.file.telegramMessageId).value = thumbnailPath;
               _coalesceDbBuffer.add(updated);
               onThumbnailLoaded?.call(
                 item.file.telegramMessageId,
-                updated.thumbnailPath!,
+                thumbnailPath,
               );
             }
 
@@ -307,8 +346,9 @@ class ThumbnailBatchManager {
             _pumpQueue();
           })
           .catchError((e) {
-            _activeRequests--;
+            _activeRequests = max(0, _activeRequests - 1);
             _inFlightDownloads.remove(item.file.telegramMessageId);
+            if (_isDisposed) return;
             debugPrint(
               '[THUMBNAIL] error loading ${item.file.telegramMessageId}: $e',
             );
@@ -320,26 +360,34 @@ class ThumbnailBatchManager {
     }
   }
 
-  /// Checks if all items in a batch have finished downloading or failed.
+  /// Marks a batch complete only when every item has a usable thumbnail.
+  /// Failed items leave the batch retryable on a later request/scroll.
   void _checkBatchCompletion(int batchIndex, List<RemoteFile> allFiles) {
     final start = batchIndex * batchSize;
     if (start >= allFiles.length) return;
     final end = min(start + batchSize, allFiles.length);
-
     final batchFiles = allFiles.sublist(start, end);
-    final allDone = batchFiles.every(
-      (f) =>
-          _completedIds.contains(f.telegramMessageId) ||
-          isFileCached(f) ||
-          (!_queuedIds.contains(f.telegramMessageId) &&
-              !_inFlightDownloads.containsKey(f.telegramMessageId)),
-    );
+
+    final allDone = batchFiles.every((file) {
+      final id = file.telegramMessageId;
+      return _completedIds.contains(id) || _resolvedCachedPaths.containsKey(id);
+    });
 
     if (allDone && _inFlightBatches.contains(batchIndex)) {
       _inFlightBatches.remove(batchIndex);
       _loadedBatches.add(batchIndex);
       debugPrint('[THUMBNAIL] batch complete: $start-$end');
       _flushDbBufferImmediate();
+      return;
+    }
+
+    final hasPending = batchFiles.any((file) {
+      final id = file.telegramMessageId;
+      return _queuedIds.contains(id) || _inFlightDownloads.containsKey(id);
+    });
+    if (!hasPending) {
+      // At least one item failed. Do not permanently mark this batch loaded.
+      _inFlightBatches.remove(batchIndex);
     }
   }
 
@@ -369,11 +417,13 @@ class ThumbnailBatchManager {
 
   /// Resets state when switching folders, refreshing, or re-syncing.
   void reset() {
+    if (_isDisposed) return;
     _coalesceTimer?.cancel();
     _coalesceTimer = null;
     _coalesceDbBuffer.clear();
     _queue.clear();
     _queuedIds.clear();
+    _completedIds.clear();
     _loadedBatches.clear();
     _inFlightBatches.clear();
     _currentVisibleBatch = 0;
@@ -381,6 +431,8 @@ class ThumbnailBatchManager {
 
   /// Disposes notifiers and timers.
   void dispose() {
+    if (_isDisposed) return;
+    _isDisposed = true;
     _coalesceTimer?.cancel();
     _coalesceTimer = null;
     _coalesceDbBuffer.clear();
@@ -390,5 +442,7 @@ class ThumbnailBatchManager {
       notifier.dispose();
     }
     _notifiers.clear();
+    _resolvedCachedPaths.clear();
+    _inFlightDownloads.clear();
   }
 }

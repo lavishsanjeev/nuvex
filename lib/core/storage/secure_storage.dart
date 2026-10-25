@@ -88,6 +88,16 @@ class NuvexSecureStore {
     return _storage.read(key: _keyUserData);
   }
 
+  /// Generic read for secure feature storage.
+  Future<String?> read({required String key}) => _storage.read(key: key);
+
+  /// Generic write for secure feature storage.
+  Future<void> write({required String key, required String? value}) =>
+      _storage.write(key: key, value: value);
+
+  /// Generic delete for secure feature storage.
+  Future<void> delete({required String key}) => _storage.delete(key: key);
+
   /// Clears only the session token and user info (e.g. on logout or session expiry).
   Future<void> clearSession() async {
     await _storage.delete(key: _keySession);

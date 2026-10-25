@@ -217,8 +217,131 @@ class _SelectionActionBarState extends State<SelectionActionBar> {
     );
   }
 
+  Future<void> _handleMoveToLockedFolder() async {
+    if (_isPerformingAction || widget.controller.selectedCount == 0) return;
+
+    final lockedCtrl = widget.controller.lockedFolderController;
+    if (!lockedCtrl.isSetup) {
+      await lockedCtrl.initialize();
+    }
+    if (!lockedCtrl.isSetup) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please set up Locked Folder in Collections first'),
+        ),
+      );
+      return;
+    }
+
+    var masterKey = lockedCtrl.masterKey;
+    if (masterKey == null) {
+      if (!mounted) return;
+      final pin = await showDialog<String>(
+        context: context,
+        builder: (ctx) {
+          final pinCtrl = TextEditingController();
+          return AlertDialog(
+            backgroundColor: Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            title: const Row(
+              children: [
+                Icon(
+                  Icons.lock_outline_rounded,
+                  color: NuvexColors.primaryBlue,
+                  size: 22,
+                ),
+                SizedBox(width: 8),
+                Text(
+                  'Enter Locked Folder PIN',
+                  style: TextStyle(
+                    fontFamily: NuvexTypography.primaryFamily,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                    color: NuvexColors.darkNavy,
+                  ),
+                ),
+              ],
+            ),
+            content: TextField(
+              controller: pinCtrl,
+              keyboardType: TextInputType.number,
+              obscureText: true,
+              autofocus: true,
+              decoration: const InputDecoration(
+                hintText: '4-digit PIN',
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(pinCtrl.text.trim()),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: NuvexColors.primaryBlue,
+                  foregroundColor: Colors.white,
+                ),
+                child: const Text('Unlock & Move'),
+              ),
+            ],
+          );
+        },
+      );
+
+      if (pin == null || pin.isEmpty || !mounted) return;
+
+      final success = await lockedCtrl.unlockWithPin(pin);
+      if (!success || lockedCtrl.masterKey == null) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(lockedCtrl.errorMessage ?? 'Incorrect PIN'),
+            backgroundColor: NuvexColors.errorRed,
+          ),
+        );
+        return;
+      }
+      masterKey = lockedCtrl.masterKey;
+    }
+
+    if (masterKey == null || !mounted) return;
+
+    setState(() => _isPerformingAction = true);
+    try {
+      final count = await widget.controller.moveSelectedToLockedFolder(masterKey);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Moved $count ${count == 1 ? 'item' : 'items'} to Locked Folder',
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+      widget.onActionCompleted?.call();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to move to Locked Folder: $e'),
+          backgroundColor: NuvexColors.errorRed,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isPerformingAction = false);
+      }
+    }
+  }
+
   void _handleSelectAll() {
     widget.controller.selectAll();
+  }
+
+  void _handleDeselectAll() {
+    widget.controller.deselectAll();
   }
 
   void _handleCancel() {
@@ -229,104 +352,152 @@ class _SelectionActionBarState extends State<SelectionActionBar> {
   Widget build(BuildContext context) {
     final count = widget.controller.selectedCount;
 
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      decoration: BoxDecoration(
-        color: NuvexColors.white,
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: const Color(0xFFE5E9F0), width: 1.2),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x18000000),
-            blurRadius: 16,
-            offset: Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          // ── Selection Count + Cancel ──
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              IconButton(
-                key: const ValueKey('selection_action_cancel'),
-                icon: const Icon(
-                  Icons.close_rounded,
-                  size: 20,
-                  color: NuvexColors.darkNavy,
-                ),
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                tooltip: 'Cancel',
-                onPressed: _isPerformingAction ? null : _handleCancel,
-              ),
-              const SizedBox(width: 4),
-              Text(
-                '$count selected',
-                key: const ValueKey('selection_count_text'),
-                style: const TextStyle(
-                  fontFamily: NuvexTypography.primaryFamily,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                  color: NuvexColors.darkNavy,
-                  letterSpacing: -0.2,
-                ),
-              ),
-            ],
-          ),
+    return SafeArea(
+      top: false,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final isCompact = constraints.maxWidth < 440;
 
-          if (_isPerformingAction)
-            const SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: NuvexColors.primaryBlue,
-              ),
-            )
-          else
-            // ── Action Buttons: Share, Save, Delete, Select All ──
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _ActionButton(
-                  key: const ValueKey('selection_action_share'),
-                  icon: Icons.share_rounded,
-                  label: 'Share',
-                  enabled: count > 0,
-                  onTap: _handleShare,
-                ),
-                const SizedBox(width: 4),
-                _ActionButton(
-                  key: const ValueKey('selection_action_save'),
-                  icon: Icons.download_rounded,
-                  label: 'Save',
-                  enabled: count > 0,
-                  onTap: _handleSave,
-                ),
-                const SizedBox(width: 4),
-                _ActionButton(
-                  key: const ValueKey('selection_action_delete'),
-                  icon: Icons.delete_outline_rounded,
-                  label: 'Delete',
-                  isDestructive: true,
-                  enabled: count > 0,
-                  onTap: _handleDelete,
-                ),
-                const SizedBox(width: 4),
-                _ActionButton(
-                  key: const ValueKey('selection_action_select_all'),
-                  icon: Icons.select_all_rounded,
-                  label: 'Select All',
-                  enabled: true,
-                  onTap: _handleSelectAll,
+          return Container(
+            margin: EdgeInsets.symmetric(
+              horizontal: isCompact ? 6 : 10,
+              vertical: isCompact ? 6 : 8,
+            ),
+            padding: EdgeInsets.symmetric(
+              horizontal: isCompact ? 6 : 10,
+              vertical: isCompact ? 4 : 6,
+            ),
+            decoration: BoxDecoration(
+              color: NuvexColors.white,
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: const Color(0xFFE5E9F0), width: 1.2),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x18000000),
+                  blurRadius: 16,
+                  offset: Offset(0, 4),
                 ),
               ],
             ),
-        ],
+            child: Row(
+              children: [
+                // ── Selection Count + Cancel (pinned on left) ──
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      key: const ValueKey('selection_action_cancel'),
+                      icon: const Icon(
+                        Icons.close_rounded,
+                        size: 18,
+                        color: NuvexColors.darkNavy,
+                      ),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
+                      visualDensity: VisualDensity.compact,
+                      tooltip: 'Cancel',
+                      onPressed: _isPerformingAction ? null : _handleCancel,
+                    ),
+                    const SizedBox(width: 2),
+                    Text(
+                      '$count selected',
+                      key: const ValueKey('selection_count_text'),
+                      style: TextStyle(
+                        fontFamily: NuvexTypography.primaryFamily,
+                        fontSize: isCompact ? 12 : 14,
+                        fontWeight: FontWeight.w700,
+                        color: NuvexColors.darkNavy,
+                        letterSpacing: -0.2,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(width: 2),
+
+                // ── Action Buttons: Cleanly fitting on mobile, scrollable on extreme font scale ──
+                Expanded(
+                  child: _isPerformingAction
+                      ? const Center(
+                          child: SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: NuvexColors.primaryBlue,
+                            ),
+                          ),
+                        )
+                      : SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          physics: const BouncingScrollPhysics(),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _ActionButton(
+                                key: const ValueKey('selection_action_share'),
+                                icon: Icons.share_rounded,
+                                label: 'Share',
+                                compact: isCompact,
+                                enabled: count > 0,
+                                onTap: _handleShare,
+                              ),
+                              const SizedBox(width: 1),
+                              _ActionButton(
+                                key: const ValueKey('selection_action_save'),
+                                icon: Icons.download_rounded,
+                                label: 'Save',
+                                compact: isCompact,
+                                enabled: count > 0,
+                                onTap: _handleSave,
+                              ),
+                              const SizedBox(width: 1),
+                              _ActionButton(
+                                key: const ValueKey('selection_action_lock'),
+                                icon: Icons.lock_outline_rounded,
+                                label: 'Lock',
+                                compact: isCompact,
+                                enabled: count > 0,
+                                onTap: _handleMoveToLockedFolder,
+                              ),
+                              const SizedBox(width: 1),
+                              _ActionButton(
+                                key: const ValueKey('selection_action_delete'),
+                                icon: Icons.delete_outline_rounded,
+                                label: 'Delete',
+                                compact: isCompact,
+                                isDestructive: true,
+                                enabled: count > 0,
+                                onTap: _handleDelete,
+                              ),
+                              const SizedBox(width: 1),
+                              _ActionButton(
+                                key: count > 0 &&
+                                        count == widget.controller.recentMedia.length
+                                    ? const ValueKey('selection_action_deselect_all')
+                                    : const ValueKey('selection_action_select_all'),
+                                icon: count > 0 &&
+                                        count == widget.controller.recentMedia.length
+                                    ? Icons.deselect_rounded
+                                    : Icons.select_all_rounded,
+                                label: count > 0 &&
+                                        count == widget.controller.recentMedia.length
+                                    ? 'Deselect'
+                                    : 'Select All',
+                                compact: isCompact,
+                                enabled: true,
+                                onTap: count > 0 &&
+                                        count == widget.controller.recentMedia.length
+                                    ? _handleDeselectAll
+                                    : _handleSelectAll,
+                              ),
+                            ],
+                          ),
+                        ),
+                ),
+              ],
+            ),
+          );
+        },
       ),
     );
   }
@@ -337,6 +508,7 @@ class _ActionButton extends StatelessWidget {
   final String label;
   final bool enabled;
   final bool isDestructive;
+  final bool compact;
   final VoidCallback onTap;
 
   const _ActionButton({
@@ -345,6 +517,7 @@ class _ActionButton extends StatelessWidget {
     required this.label,
     this.enabled = true,
     this.isDestructive = false,
+    this.compact = false,
     required this.onTap,
   });
 
@@ -356,30 +529,49 @@ class _ActionButton extends StatelessWidget {
         ? NuvexColors.errorRed
         : NuvexColors.darkNavy;
 
-    return Tooltip(
-      message: label,
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(10),
-          onTap: enabled ? onTap : null,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(icon, size: 20, color: color),
-                const SizedBox(height: 2),
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontFamily: NuvexTypography.primaryFamily,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w600,
-                    color: color,
-                  ),
+    return Semantics(
+      label: label,
+      button: true,
+      enabled: enabled,
+      child: Tooltip(
+        message: label,
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(10),
+            onTap: enabled ? onTap : null,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                minWidth: compact ? 34 : 44,
+                minHeight: 38,
+              ),
+              child: Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: compact ? 4 : 6,
+                  vertical: 4,
                 ),
-              ],
+                child: compact
+                    ? Center(
+                        child: Icon(icon, size: 20, color: color),
+                      )
+                    : Column(
+                        mainAxisSize: MainAxisSize.min,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(icon, size: 20, color: color),
+                          const SizedBox(height: 2),
+                          Text(
+                            label,
+                            style: TextStyle(
+                              fontFamily: NuvexTypography.primaryFamily,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                              color: color,
+                            ),
+                          ),
+                        ],
+                      ),
+              ),
             ),
           ),
         ),

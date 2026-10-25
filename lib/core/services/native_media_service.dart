@@ -237,6 +237,29 @@ class NativeMediaService {
     }
   }
 
+  /// Optional test hook to mock URL launching without depending on Android OS.
+  @visibleForTesting
+  static Future<bool> Function(String url)? openUrlMock;
+
+  /// Opens an external URL (e.g. GitHub release page or APK download link)
+  /// using the platform's default browser or installer.
+  static Future<bool> openUrl(String url) async {
+    if (url.trim().isEmpty) return false;
+    if (openUrlMock != null) {
+      return openUrlMock!(url);
+    }
+    try {
+      final res = await _channel.invokeMethod<bool>('openUrl', {'url': url});
+      return res ?? false;
+    } on MissingPluginException {
+      debugPrint('[NATIVE] openUrl: MethodChannel not available (test runtime)');
+      return false;
+    } catch (e) {
+      debugPrint('[NATIVE] Failed to open URL: $e');
+      return false;
+    }
+  }
+
   /// Optional test hook to mock gallery cleanup behavior without depending on Android OS.
   @visibleForTesting
   static Future<int> Function()? cleanupUnwantedGalleryFilesMock;

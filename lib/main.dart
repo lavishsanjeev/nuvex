@@ -10,10 +10,11 @@ import 'features/auth/controllers/auth_controller.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Bounded image cache to prevent unconstrained memory usage and GC spikes during scrolling
-  PaintingBinding.instance.imageCache.maximumSize = 150;
+  // Bounded image cache: sized to retain ~45 rows (180 items) of grid thumbnails in memory
+  // without triggering Android Dalvik/ART GC pauses or memory pressure during scrolling.
+  PaintingBinding.instance.imageCache.maximumSize = 180;
   PaintingBinding.instance.imageCache.maximumSizeBytes =
-      40 * 1024 * 1024; // 40MB
+      50 * 1024 * 1024; // 50MB
 
   // Non-blocking background cache maintenance
   unawaited(NativeMediaService.cleanupUnwantedGalleryFiles());

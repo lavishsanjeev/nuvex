@@ -9,7 +9,7 @@ import '../repositories/media_repository.dart';
 /// Service resolving representative [RemoteFile]s and cached thumbnails for collection cards.
 ///
 /// Implements the pipeline:
-/// Collection → real RemoteFile query → matching metadata/filter → representative RemoteFile → existing thumbnail cache → Collection card thumbnail.
+/// Collection â†’ real RemoteFile query â†’ matching metadata/filter â†’ representative RemoteFile â†’ existing thumbnail cache â†’ Collection card thumbnail.
 ///
 /// Complies strictly with safety & performance rules:
 /// - Never downloads full original media just for card thumbnails
@@ -70,7 +70,7 @@ class CollectionThumbnailResolver {
     // 1. Check existing thumbnail on disk
     if (file.thumbnailPath != null && file.thumbnailPath!.isNotEmpty) {
       final f = File(file.thumbnailPath!);
-      if (f.existsSync() && f.lengthSync() > 0) {
+      if (await f.exists() && await f.length() > 0) {
         return file.thumbnailPath;
       }
     }
@@ -78,7 +78,7 @@ class CollectionThumbnailResolver {
     // 2. Check existing local full media (if non-video and exists on disk)
     if (!file.isVideo && file.localPath != null && file.localPath!.isNotEmpty) {
       final f = File(file.localPath!);
-      if (f.existsSync() && f.lengthSync() > 0) {
+      if (await f.exists() && await f.length() > 0) {
         return file.localPath;
       }
     }
@@ -89,7 +89,7 @@ class CollectionThumbnailResolver {
         final updated = await repository.ensureThumbnailAvailable(file);
         if (updated.thumbnailPath != null) {
           final f = File(updated.thumbnailPath!);
-          if (f.existsSync() && f.lengthSync() > 0) {
+          if (await f.exists() && await f.length() > 0) {
             return updated.thumbnailPath;
           }
         }

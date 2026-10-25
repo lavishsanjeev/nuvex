@@ -181,21 +181,27 @@ class _MediaTileState extends State<MediaTile> {
                   cacheHeight: 300,
                   frameBuilder:
                       (context, child, frame, wasSynchronouslyLoaded) {
-                        if (wasSynchronouslyLoaded) {
+                        if (wasSynchronouslyLoaded || frame != null) {
                           return child;
-                        }
-                        if (frame != null) {
-                          return AnimatedOpacity(
-                            opacity: 1,
-                            duration: const Duration(milliseconds: 180),
-                            curve: Curves.easeOut,
-                            child: child,
-                          );
                         }
                         return _buildPlaceholder(isVideo);
                       },
-                  errorBuilder: (context, error, stackTrace) =>
-                      _buildPlaceholder(isVideo),
+                  errorBuilder: (context, error, stackTrace) {
+                    if (widget.controller != null) {
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (!mounted) return;
+                        widget.controller?.batchManager.invalidateThumbnail(
+                          _currentFile.telegramMessageId,
+                        );
+                        if (widget.index != null) {
+                          widget.controller?.requestThumbnailBatchForIndex(
+                            widget.index!,
+                          );
+                        }
+                      });
+                    }
+                    return _buildPlaceholder(isVideo);
+                  },
                 )
               else
                 _buildPlaceholder(isVideo),

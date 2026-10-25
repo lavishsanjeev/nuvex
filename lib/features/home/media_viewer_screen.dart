@@ -10,6 +10,13 @@ import '../../core/services/native_media_service.dart';
 import '../../core/services/video_prefetch_manager.dart';
 import '../../core/services/video_streaming_proxy.dart';
 import 'controllers/media_controller.dart';
+import 'widgets/nuvex_loading_view.dart';
+
+String _formatDuration(Duration d) {
+  final minutes = d.inMinutes;
+  final seconds = d.inSeconds % 60;
+  return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+}
 
 /// Full-screen immersive media viewer and player for original-quality Telegram media.
 ///
@@ -970,12 +977,6 @@ class _MediaViewerScreenState extends State<MediaViewerScreen>
     );
   }
 
-  String _formatDuration(Duration d) {
-    final minutes = d.inMinutes;
-    final seconds = d.inSeconds % 60;
-    return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
-  }
-
   String _formatFullDateTime(DateTime dt) {
     final local = dt.toLocal();
     final day = local.day.toString().padLeft(2, '0');
@@ -1378,10 +1379,9 @@ class _MediaPageItem extends StatefulWidget {
 }
 
 class _MediaPageItemState extends State<_MediaPageItem>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late RemoteFile _currentFile;
   bool _isDownloading = false;
-  double _downloadProgress = 0.0;
   String? _downloadError;
 
   // Zoom State
@@ -1396,6 +1396,8 @@ class _MediaPageItemState extends State<_MediaPageItem>
   bool _isVideoInitialized = false;
   bool _isStreaming = false;
   String? _activeStreamUrl;
+  bool _hasRenderedFirstFrame = false;
+  late double _aspectRatio;
 
   bool get _isVideo =>
       _currentFile.category == 'videos' ||
@@ -1457,26 +1459,19 @@ class _MediaPageItemState extends State<_MediaPageItem>
     return null;
   }
 
-  Widget _buildVideoThumbnail() {
-    final thumbPath = _getThumbnailPath();
-    if (thumbPath != null) {
-      return Center(
-        child: Image.file(
-          File(thumbPath),
-          fit: BoxFit.contain,
-          width: double.infinity,
-          height: double.infinity,
-          errorBuilder: (context, error, stackTrace) => const SizedBox.shrink(),
-        ),
-      );
-    }
-    return const SizedBox.shrink();
-  }
+  double _getVideoAspectRatio() => _aspectRatio;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _currentFile = widget.file;
+    _aspectRatio =
+        (_currentFile.width != null &&
+            _currentFile.height != null &&
+            _currentFile.height! > 0)
+        ? _currentFile.width! / _currentFile.height!
+        : 16 / 9;
 
     _transformationController = TransformationController();
     _transformationController.addListener(_handleTransformationChange);
@@ -1509,11 +1504,31 @@ class _MediaPageItemState extends State<_MediaPageItem>
   @override
   void didUpdateWidget(_MediaPageItem oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.file != oldWidget.file) {
+    if (widget.file.id != oldWidget.file.id ||
+        widget.file.telegramMessageId != oldWidget.file.telegramMessageId) {
+      _cleanUpStream();
+      _currentFile = widget.file;
+      _downloadError = null;
+      if (widget.isActive) {
+        _checkAndPrepareFile();
+      } else if (_isVideo && _getThumbnailPath() == null) {
+        widget.controller.loadThumbnail(_currentFile).then((updated) {
+          if (mounted &&
+              updated.thumbnailPath != null &&
+              _currentFile.telegramMessageId == updated.telegramMessageId) {
+            setState(() {
+              _currentFile = updated;
+            });
+          }
+        });
+      }
+    } else if (widget.file != oldWidget.file) {
       _currentFile = widget.file;
       if (_isVideo && _getThumbnailPath() == null) {
         widget.controller.loadThumbnail(_currentFile).then((updated) {
-          if (mounted && updated.thumbnailPath != null) {
+          if (mounted &&
+              updated.thumbnailPath != null &&
+              _currentFile.telegramMessageId == updated.telegramMessageId) {
             setState(() {
               _currentFile = updated;
             });
@@ -1627,6 +1642,8 @@ class _MediaPageItemState extends State<_MediaPageItem>
     try {
       final proxy = VideoStreamingProxy.instance;
       await proxy.ensureStarted();
+      if (!mounted) return;
+
       final streamUrl = proxy.registerFile(_currentFile);
       _activeStreamUrl = streamUrl;
 
@@ -1645,12 +1662,20 @@ class _MediaPageItemState extends State<_MediaPageItem>
         },
       );
 
-      if (!mounted) return;
+      if (!mounted) {
+        controller.removeListener(_videoPlayerListener);
+        controller.dispose();
+        return;
+      }
 
       startupStopwatch.stop();
       debugPrint(
         '[PERF_STARTUP] Tap to controller init: ${startupStopwatch.elapsedMilliseconds}ms | size=${controller.value.size}, duration=${controller.value.duration} for #${_currentFile.telegramMessageId}',
       );
+
+      if (controller.value.aspectRatio > 0) {
+        _aspectRatio = controller.value.aspectRatio;
+      }
 
       setState(() {
         _isVideoInitialized = true;
@@ -1691,6 +1716,9 @@ class _MediaPageItemState extends State<_MediaPageItem>
       _videoPlayerController?.dispose();
       _videoPlayerController = null;
     }
+    _isVideoInitialized = false;
+    _hasRenderedFirstFrame = false;
+    _firstFrameLogged = false;
   }
 
   bool _lastBufferingState = false;
@@ -1715,12 +1743,18 @@ class _MediaPageItemState extends State<_MediaPageItem>
       return;
     }
 
-    // Instrument first rendered frame
-    if (!_firstFrameLogged && controller.value.position > Duration.zero) {
-      _firstFrameLogged = true;
-      debugPrint(
-        '[PERF_STARTUP] Tap to first rendered frame reached at position: ${controller.value.position} for #${_currentFile.telegramMessageId}',
-      );
+    // Instrument and activate first rendered frame state
+    if (!_hasRenderedFirstFrame &&
+        controller.value.isInitialized &&
+        (controller.value.position > Duration.zero ||
+            controller.value.isPlaying)) {
+      _hasRenderedFirstFrame = true;
+      if (!_firstFrameLogged) {
+        _firstFrameLogged = true;
+        debugPrint(
+          '[PERF_STARTUP] Tap to first rendered frame reached at position: ${controller.value.position} for #${_currentFile.telegramMessageId}',
+        );
+      }
     }
 
     // Instrument buffering state transitions
@@ -1744,16 +1778,25 @@ class _MediaPageItemState extends State<_MediaPageItem>
   }
 
   Future<void> _initVideoPlayerFromFile(String path) async {
+    if (_isVideoInitialized || _isStreaming) return;
     final file = File(path);
     if (!file.existsSync()) return;
 
     try {
+      _cleanUpStream();
       final controller = VideoPlayerController.file(file);
       _videoPlayerController = controller;
       await controller.initialize();
-      if (!mounted) return;
+      if (!mounted) {
+        controller.dispose();
+        return;
+      }
 
       controller.addListener(_videoPlayerListener);
+
+      if (controller.value.aspectRatio > 0) {
+        _aspectRatio = controller.value.aspectRatio;
+      }
 
       setState(() {
         _isVideoInitialized = true;
@@ -1778,21 +1821,11 @@ class _MediaPageItemState extends State<_MediaPageItem>
 
     setState(() {
       _isDownloading = true;
-      _downloadProgress = 0.0;
       _downloadError = null;
     });
 
     try {
-      final downloaded = await widget.controller.downloadFile(
-        _currentFile,
-        onProgress: (p) {
-          if (mounted) {
-            setState(() {
-              _downloadProgress = p;
-            });
-          }
-        },
-      );
+      final downloaded = await widget.controller.downloadFile(_currentFile);
 
       if (!mounted) return;
 
@@ -1816,6 +1849,7 @@ class _MediaPageItemState extends State<_MediaPageItem>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _cleanUpStream();
     _transformationController.removeListener(_handleTransformationChange);
     _transformationController.dispose();
@@ -1823,10 +1857,14 @@ class _MediaPageItemState extends State<_MediaPageItem>
     super.dispose();
   }
 
-  String _formatDuration(Duration d) {
-    final minutes = d.inMinutes;
-    final seconds = d.inSeconds % 60;
-    return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      if (_videoPlayerController != null && _isVideoInitialized) {
+        _videoPlayerController?.pause();
+      }
+    }
   }
 
   @override
@@ -1835,6 +1873,7 @@ class _MediaPageItemState extends State<_MediaPageItem>
     if (_isVideo) {
       final controller = _videoPlayerController;
       final isReady = _isVideoInitialized && controller != null;
+      final aspectRatio = _getVideoAspectRatio();
 
       return GestureDetector(
         behavior: HitTestBehavior.opaque,
@@ -1844,21 +1883,16 @@ class _MediaPageItemState extends State<_MediaPageItem>
         child: Stack(
           alignment: Alignment.center,
           children: [
-            // Instant Video Thumbnail (always visible as base layer)
-            _buildVideoThumbnail(),
-
-            // Active Video Player once initialized
+            // Active Video Player once initialized (isolated in RepaintBoundary)
             if (isReady)
               Center(
                 child: AspectRatio(
-                  aspectRatio: controller.value.aspectRatio > 0
-                      ? controller.value.aspectRatio
-                      : 16 / 9,
-                  child: VideoPlayer(controller),
+                  aspectRatio: aspectRatio,
+                  child: RepaintBoundary(child: VideoPlayer(controller)),
                 ),
               ),
 
-            // Video Center Overlay: Error, Download, Loading Spinner, or Play/Pause Button
+            // Video Center Overlay: Error, Skeleton Shimmer, or Play/Pause Button
             if (_downloadError != null)
               Center(
                 child: Container(
@@ -1942,125 +1976,22 @@ class _MediaPageItemState extends State<_MediaPageItem>
                   ),
                 ),
               )
-            else if (_isDownloading)
-              Center(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 10,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.7),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          value: _downloadProgress > 0
-                              ? _downloadProgress
-                              : null,
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        _downloadProgress > 0
-                            ? 'Downloading (${(_downloadProgress * 100).toInt()}%)...'
-                            : 'Connecting...',
-                        style: const TextStyle(
-                          fontFamily: NuvexTypography.primaryFamily,
-                          fontSize: 12,
-                          color: Colors.white,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              )
             else if (!isReady)
-              // Small subtle circular progress indicator over thumbnail while initializing
-              Center(
-                child: Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.45),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const SizedBox(
-                    width: 26,
-                    height: 26,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.5,
-                      color: Colors.white,
-                    ),
-                  ),
-                ),
+              NuvexLoadingView(
+                isDark: true,
+                aspectRatio: aspectRatio,
+                thumbnailPath: _getThumbnailPath(),
+                isVideo: true,
               )
             else
-              // Play/Pause / Buffering tap overlay scoped to ValueListenableBuilder
-              ValueListenableBuilder<VideoPlayerValue>(
-                valueListenable: controller,
-                builder: (context, val, _) {
-                  if (val.isBuffering) {
-                    return Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.45),
-                        shape: BoxShape.circle,
-                      ),
-                      child: const SizedBox(
-                        width: 26,
-                        height: 26,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2.5,
-                          color: Colors.white,
-                        ),
-                      ),
-                    );
-                  }
-                  return AnimatedOpacity(
-                    opacity: widget.showControls ? 1.0 : 0.0,
-                    duration: const Duration(milliseconds: 200),
-                    child: IgnorePointer(
-                      ignoring: !widget.showControls,
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () {
-                          if (val.isPlaying) {
-                            controller.pause();
-                          } else {
-                            if (val.position >= val.duration) {
-                              controller.seekTo(Duration.zero);
-                            }
-                            controller.play();
-                          }
-                          widget.onResetAutoHideTimer();
-                        },
-                        child: Container(
-                          width: 68,
-                          height: 68,
-                          decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: 0.55),
-                            shape: BoxShape.circle,
-                          ),
-                          child: Icon(
-                            val.isPlaying ? Icons.pause : Icons.play_arrow,
-                            color: Colors.white,
-                            size: 40,
-                          ),
-                        ),
-                      ),
-                    ),
-                  );
-                },
+              // Isolated play/pause & buffering overlay (rebuilds ONLY on play/buffering state changes)
+              _VideoPlayPauseOverlay(
+                controller: controller,
+                showControls: widget.showControls,
+                onResetAutoHideTimer: widget.onResetAutoHideTimer,
               ),
 
-            // Video Bottom Progress Bar & Time
+            // Video Bottom Progress Bar & Time (isolated to prevent rebuilding entire viewer)
             if (isReady)
               Positioned(
                 bottom: MediaQuery.of(context).padding.bottom + 92,
@@ -2071,69 +2002,11 @@ class _MediaPageItemState extends State<_MediaPageItem>
                   duration: const Duration(milliseconds: 200),
                   child: IgnorePointer(
                     ignoring: !widget.showControls,
-                    child: Listener(
-                      onPointerDown: (_) => widget.onScrubbingChanged(true),
-                      onPointerUp: (_) => widget.onScrubbingChanged(false),
-                      onPointerCancel: (_) => widget.onScrubbingChanged(false),
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () {
-                          widget.onResetAutoHideTimer();
-                        },
-                        child: ValueListenableBuilder<VideoPlayerValue>(
-                          valueListenable: controller,
-                          builder: (context, val, _) {
-                            return Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 14,
-                                vertical: 6,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withValues(alpha: 0.7),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Row(
-                                children: [
-                                  Text(
-                                    _formatDuration(val.position),
-                                    style: const TextStyle(
-                                      fontFamily: NuvexTypography.primaryFamily,
-                                      fontSize: 12,
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 10),
-                                  Expanded(
-                                    child: VideoProgressIndicator(
-                                      controller,
-                                      allowScrubbing: true,
-                                      padding: const EdgeInsets.symmetric(
-                                        vertical: 10,
-                                      ),
-                                      colors: const VideoProgressColors(
-                                        playedColor: NuvexColors.primaryBlue,
-                                        bufferedColor: Colors.white24,
-                                        backgroundColor: Colors.white12,
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 10),
-                                  Text(
-                                    _formatDuration(val.duration),
-                                    style: TextStyle(
-                                      fontFamily: NuvexTypography.primaryFamily,
-                                      fontSize: 12,
-                                      color: Colors.white.withValues(
-                                        alpha: 0.7,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            );
-                          },
-                        ),
-                      ),
+                    child: _VideoProgressBar(
+                      controller: controller,
+                      showControls: widget.showControls,
+                      onScrubbingChanged: widget.onScrubbingChanged,
+                      onResetAutoHideTimer: widget.onResetAutoHideTimer,
                     ),
                   ),
                 ),
@@ -2143,46 +2016,13 @@ class _MediaPageItemState extends State<_MediaPageItem>
       );
     }
 
-    // ── 2. Photo / Document Downloading State ──
+    // ── 2. Photo / Document Downloading State (Google Photos skeleton) ──
     if (_isDownloading) {
-      final percent = (_downloadProgress * 100).toInt();
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            SizedBox(
-              width: 56,
-              height: 56,
-              child: CircularProgressIndicator(
-                value: _downloadProgress > 0 ? _downloadProgress : null,
-                strokeWidth: 3.5,
-                color: NuvexColors.primaryBlue,
-                backgroundColor: Colors.white.withValues(alpha: 0.15),
-              ),
-            ),
-            const SizedBox(height: 24),
-            Text(
-              _downloadProgress > 0
-                  ? 'Downloading original ($percent%)...'
-                  : 'Connecting to Telegram...',
-              style: const TextStyle(
-                fontFamily: NuvexTypography.primaryFamily,
-                fontSize: 15,
-                fontWeight: FontWeight.w500,
-                color: Colors.white,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              _currentFile.formattedSize,
-              style: TextStyle(
-                fontFamily: NuvexTypography.primaryFamily,
-                fontSize: 13,
-                color: Colors.white.withValues(alpha: 0.6),
-              ),
-            ),
-          ],
-        ),
+      return NuvexLoadingView(
+        isDark: true,
+        aspectRatio: _aspectRatio,
+        thumbnailPath: _getThumbnailPath(),
+        isVideo: false,
       );
     }
 
@@ -2364,8 +2204,257 @@ class _MediaPageItemState extends State<_MediaPageItem>
     }
 
     // Default loader while checking local storage
-    return const Center(
-      child: CircularProgressIndicator(color: NuvexColors.primaryBlue),
+    return NuvexLoadingView(
+      isDark: true,
+      aspectRatio: _aspectRatio,
+      thumbnailPath: _getThumbnailPath(),
+      isVideo: _isVideo,
+    );
+  }
+}
+
+/// Isolated play/pause and buffering indicator overlay.
+/// Only rebuilds when play state, buffering state, or control visibility toggles,
+/// completely decoupling high-frequency position ticks from widget rebuilds.
+class _VideoPlayPauseOverlay extends StatefulWidget {
+  final VideoPlayerController controller;
+  final bool showControls;
+  final VoidCallback onResetAutoHideTimer;
+
+  const _VideoPlayPauseOverlay({
+    required this.controller,
+    required this.showControls,
+    required this.onResetAutoHideTimer,
+  });
+
+  @override
+  State<_VideoPlayPauseOverlay> createState() => _VideoPlayPauseOverlayState();
+}
+
+class _VideoPlayPauseOverlayState extends State<_VideoPlayPauseOverlay> {
+  bool _isPlaying = false;
+  bool _isBuffering = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _isPlaying = widget.controller.value.isPlaying;
+    _isBuffering = widget.controller.value.isBuffering;
+    widget.controller.addListener(_onControllerTick);
+  }
+
+  @override
+  void didUpdateWidget(_VideoPlayPauseOverlay oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_onControllerTick);
+      _isPlaying = widget.controller.value.isPlaying;
+      _isBuffering = widget.controller.value.isBuffering;
+      widget.controller.addListener(_onControllerTick);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onControllerTick);
+    super.dispose();
+  }
+
+  void _onControllerTick() {
+    final playing = widget.controller.value.isPlaying;
+    final buffering = widget.controller.value.isBuffering;
+    if (playing != _isPlaying || buffering != _isBuffering) {
+      if (mounted) {
+        setState(() {
+          _isPlaying = playing;
+          _isBuffering = buffering;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isBuffering) {
+      return Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.45),
+          shape: BoxShape.circle,
+        ),
+        child: const SizedBox(
+          width: 26,
+          height: 26,
+          child: CircularProgressIndicator(
+            strokeWidth: 2.5,
+            color: Colors.white,
+          ),
+        ),
+      );
+    }
+
+    return AnimatedOpacity(
+      opacity: widget.showControls ? 1.0 : 0.0,
+      duration: const Duration(milliseconds: 200),
+      child: IgnorePointer(
+        ignoring: !widget.showControls,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () {
+            if (_isPlaying) {
+              widget.controller.pause();
+            } else {
+              if (widget.controller.value.position >=
+                  widget.controller.value.duration) {
+                widget.controller.seekTo(Duration.zero);
+              }
+              widget.controller.play();
+            }
+            widget.onResetAutoHideTimer();
+          },
+          child: Container(
+            width: 68,
+            height: 68,
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.55),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              _isPlaying ? Icons.pause : Icons.play_arrow,
+              color: Colors.white,
+              size: 40,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Isolated video progress bar and elapsed time display.
+/// Prevents recreating VideoProgressIndicator on every position update and skips
+/// all updates when controls are hidden.
+class _VideoProgressBar extends StatefulWidget {
+  final VideoPlayerController controller;
+  final bool showControls;
+  final ValueChanged<bool> onScrubbingChanged;
+  final VoidCallback onResetAutoHideTimer;
+
+  const _VideoProgressBar({
+    required this.controller,
+    required this.showControls,
+    required this.onScrubbingChanged,
+    required this.onResetAutoHideTimer,
+  });
+
+  @override
+  State<_VideoProgressBar> createState() => _VideoProgressBarState();
+}
+
+class _VideoProgressBarState extends State<_VideoProgressBar> {
+  int _lastPositionSeconds = -1;
+  int _lastDurationSeconds = -1;
+  late Widget _progressIndicator;
+
+  @override
+  void initState() {
+    super.initState();
+    _progressIndicator = VideoProgressIndicator(
+      widget.controller,
+      allowScrubbing: true,
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      colors: const VideoProgressColors(
+        playedColor: NuvexColors.primaryBlue,
+        bufferedColor: Colors.white24,
+        backgroundColor: Colors.white12,
+      ),
+    );
+    _lastPositionSeconds = widget.controller.value.position.inSeconds;
+    _lastDurationSeconds = widget.controller.value.duration.inSeconds;
+    widget.controller.addListener(_onControllerTick);
+  }
+
+  @override
+  void didUpdateWidget(_VideoProgressBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_onControllerTick);
+      _progressIndicator = VideoProgressIndicator(
+        widget.controller,
+        allowScrubbing: true,
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        colors: const VideoProgressColors(
+          playedColor: NuvexColors.primaryBlue,
+          bufferedColor: Colors.white24,
+          backgroundColor: Colors.white12,
+        ),
+      );
+      _lastPositionSeconds = widget.controller.value.position.inSeconds;
+      _lastDurationSeconds = widget.controller.value.duration.inSeconds;
+      widget.controller.addListener(_onControllerTick);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onControllerTick);
+    super.dispose();
+  }
+
+  void _onControllerTick() {
+    if (!widget.showControls) return; // Completely skip work when hidden
+    final posSec = widget.controller.value.position.inSeconds;
+    final durSec = widget.controller.value.duration.inSeconds;
+    if (posSec != _lastPositionSeconds || durSec != _lastDurationSeconds) {
+      if (mounted) {
+        setState(() {
+          _lastPositionSeconds = posSec;
+          _lastDurationSeconds = durSec;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      onPointerDown: (_) => widget.onScrubbingChanged(true),
+      onPointerUp: (_) => widget.onScrubbingChanged(false),
+      onPointerCancel: (_) => widget.onScrubbingChanged(false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onResetAutoHideTimer,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.7),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            children: [
+              Text(
+                _formatDuration(widget.controller.value.position),
+                style: const TextStyle(
+                  fontFamily: NuvexTypography.primaryFamily,
+                  fontSize: 12,
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(child: _progressIndicator),
+              const SizedBox(width: 10),
+              Text(
+                _formatDuration(widget.controller.value.duration),
+                style: TextStyle(
+                  fontFamily: NuvexTypography.primaryFamily,
+                  fontSize: 12,
+                  color: Colors.white.withValues(alpha: 0.7),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

@@ -80,6 +80,7 @@ class TelegramMediaService {
   final TelegramAuthService _authService;
   final Map<int, t.InputDocumentFileLocation> _locationCache = {};
   final Map<int, Future<t.InputDocumentFileLocation>> _inFlightLocations = {};
+  final Map<int, t.Message> _messageCache = {};
 
   TelegramMediaService({TelegramAuthService? authService})
     : _authService = authService ?? TelegramAuthService();
@@ -91,14 +92,16 @@ class TelegramMediaService {
 
   TelegramAuthService get authService => _authService;
 
-  /// Clears the cached file location for a specific message ID or all messages.
+  /// Clears the cached file location and message metadata for a specific message ID or all messages.
   void clearLocationCache([int? messageId]) {
     if (messageId != null) {
       _locationCache.remove(messageId);
       _inFlightLocations.remove(messageId);
+      _messageCache.remove(messageId);
     } else {
       _locationCache.clear();
       _inFlightLocations.clear();
+      _messageCache.clear();
     }
   }
 
@@ -463,6 +466,7 @@ class TelegramMediaService {
       final List<RemoteFile> remoteFiles = [];
       for (final msg in rawMessages) {
         if (msg is t.Message) {
+          _messageCache[msg.id] = msg;
           if (oldestMsgId == null || msg.id < oldestMsgId) {
             oldestMsgId = msg.id;
           }
@@ -495,7 +499,7 @@ class TelegramMediaService {
     } on TimeoutException {
       debugPrint('[SYNC] Request timed out while fetching Saved Messages');
       throw TimeoutException(
-        'Request timed out while connecting to Telegram. Please tap retry.',
+        'Request timed out while connecting. Please tap retry.',
       );
     } catch (e) {
       debugPrint('[SYNC] Exception fetching Saved Messages: $e');
@@ -723,37 +727,43 @@ class TelegramMediaService {
       return destFile;
     }
 
-    // 1. Fetch fresh message to obtain up-to-date fileReference and accessHash
-    final msgRes = await client.messages
-        .getMessages(id: [t.InputMessageID(id: file.telegramMessageId)])
-        .timeout(timeout);
+    // 1. Obtain up-to-date message metadata: check memory cache first to eliminate redundant MTProto RPCs
+    t.Message? targetMsg = _messageCache[file.telegramMessageId];
+    if (targetMsg == null) {
+      final msgRes = await client.messages
+          .getMessages(id: [t.InputMessageID(id: file.telegramMessageId)])
+          .timeout(timeout);
 
-    if (msgRes.error != null) {
-      throw Exception('Telegram error: ${msgRes.error!.errorMessage}');
-    }
+      if (msgRes.error != null) {
+        throw Exception('Telegram error: ${msgRes.error!.errorMessage}');
+      }
 
-    final result = msgRes.result;
-    t.Message? targetMsg;
-    if (result is t.MessagesMessages) {
-      for (final m in result.messages) {
-        if (m is t.Message && m.id == file.telegramMessageId) {
-          targetMsg = m;
-          break;
+      final result = msgRes.result;
+      if (result is t.MessagesMessages) {
+        for (final m in result.messages) {
+          if (m is t.Message && m.id == file.telegramMessageId) {
+            targetMsg = m;
+            break;
+          }
+        }
+      } else if (result is t.MessagesMessagesSlice) {
+        for (final m in result.messages) {
+          if (m is t.Message && m.id == file.telegramMessageId) {
+            targetMsg = m;
+            break;
+          }
+        }
+      } else if (result is t.MessagesChannelMessages) {
+        for (final m in result.messages) {
+          if (m is t.Message && m.id == file.telegramMessageId) {
+            targetMsg = m;
+            break;
+          }
         }
       }
-    } else if (result is t.MessagesMessagesSlice) {
-      for (final m in result.messages) {
-        if (m is t.Message && m.id == file.telegramMessageId) {
-          targetMsg = m;
-          break;
-        }
-      }
-    } else if (result is t.MessagesChannelMessages) {
-      for (final m in result.messages) {
-        if (m is t.Message && m.id == file.telegramMessageId) {
-          targetMsg = m;
-          break;
-        }
+
+      if (targetMsg != null) {
+        _messageCache[file.telegramMessageId] = targetMsg;
       }
     }
 
@@ -781,7 +791,7 @@ class TelegramMediaService {
         }
       }
 
-      // Select the largest suitable real thumbnail, preferably ~320–640px.
+      // Select the largest suitable real thumbnail, preferably ~320â€“640px.
       // Prefer MTProto thumbnail type 'm' (box 320x320) when available;
       // otherwise use the best available larger thumbnail (e.g. 'x', or 's' as fallback).
       String thumbSize = 'm';
@@ -925,7 +935,10 @@ class TelegramMediaService {
       destFile.parent.createSync(recursive: true);
     }
 
-    final sink = destFile.openWrite();
+    final tmpFile = File(
+      '$destinationPath.tmp_${DateTime.now().microsecondsSinceEpoch}',
+    );
+    final sink = tmpFile.openWrite();
     int offset = 0;
     const int chunkSize = 128 * 1024;
     bool isComplete = false;
@@ -967,12 +980,15 @@ class TelegramMediaService {
 
       await sink.flush();
       await sink.close();
+      if (await tmpFile.exists()) {
+        await tmpFile.rename(destinationPath);
+      }
       return destFile;
     } catch (e) {
       await sink.close();
-      if (destFile.existsSync()) {
+      if (await tmpFile.exists()) {
         try {
-          destFile.deleteSync();
+          await tmpFile.delete();
         } catch (_) {}
       }
       rethrow;
@@ -1052,7 +1068,7 @@ class TelegramMediaService {
     final date = msg.date;
     final messageId = msg.id;
 
-    // ── 1. Photo Media (Standard Telegram compressed photos) ──
+    // â”€â”€ 1. Photo Media (Standard Telegram compressed photos) â”€â”€
     if (media is t.MessageMediaPhoto) {
       final photo = media.photo;
       if (photo is! t.Photo) return null;
@@ -1131,7 +1147,7 @@ class TelegramMediaService {
       );
     }
 
-    // ── 2. Document Media (Photos, Videos, Files uploaded as Document) ──
+    // â”€â”€ 2. Document Media (Photos, Videos, Files uploaded as Document) â”€â”€
     if (media is t.MessageMediaDocument) {
       final doc = media.document;
       if (doc is! t.Document) return null;
@@ -1513,11 +1529,12 @@ class TelegramMediaService {
       );
     }
 
+    final bool isVideoUpload = resolvedMimeType.startsWith('video/');
+
     // Build uncompressed Telegram DOCUMENT media
     final media = t.InputMediaUploadedDocument(
       nosoundVideo: false,
-      forceFile:
-          true, // CRITICAL: Forces Telegram to treat as untouched Document/File
+      forceFile: !isVideoUpload, // false for streaming videos, true for untouched photo documents
       spoiler: false,
       file: inputFile,
       mimeType: resolvedMimeType,

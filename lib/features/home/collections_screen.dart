@@ -6,6 +6,7 @@ import '../account/account_screen.dart';
 import '../auth/controllers/auth_controller.dart';
 import '../../telegram/telegram_media_service.dart';
 import 'collection_detail_screen.dart';
+import '../locked_folder/screens/locked_folder_screen.dart';
 import 'controllers/media_controller.dart';
 import 'recently_deleted_screen.dart';
 import 'repositories/media_repository.dart';
@@ -82,6 +83,17 @@ class _CollectionsScreenState extends State<CollectionsScreen> {
           title: title,
           categoryKey: categoryKey,
           repository: _mediaController.repository,
+          mediaController: _mediaController,
+        ),
+      ),
+    );
+  }
+
+  void _openLockedFolder() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => LockedFolderScreen(
+          controller: _mediaController.lockedFolderController,
           mediaController: _mediaController,
         ),
       ),
@@ -382,10 +394,10 @@ class _CollectionsScreenState extends State<CollectionsScreen> {
                       color: Color(0xFFF1F5F9),
                     ),
                     CollectionRow(
-                      title: 'Locked',
+                      title: 'Locked Folder',
                       icon: Icons.lock_outline_rounded,
-                      count: counts['locked'],
-                      onTap: () => _openCategory('Locked', 'locked'),
+
+                      onTap: _openLockedFolder,
                     ),
                   ],
                 ),

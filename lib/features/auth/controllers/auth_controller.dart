@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -85,6 +86,10 @@ class AuthController extends ChangeNotifier {
   int? _codeTimeoutSeconds;
   NuvexTelegramUser? _currentUser;
   bool _isRestoringSession = false;
+  bool _isBackendReachable = true;
+
+  bool get isBackendReachable => _isBackendReachable;
+  bool get isOffline => !_isBackendReachable;
 
   AuthStatus get status => _status;
   String? get errorMessage => _errorMessage;
@@ -141,60 +146,130 @@ class AuthController extends ChangeNotifier {
       await _secureStore.clearSession();
     }
 
-    // If credentials AND a previously authorized session exist, verify with Telegram
+    // If credentials AND a previously authorized session exist, restore local session immediately
     if (creds != null &&
         savedSession != null &&
         savedSession.isNotEmpty &&
         savedUserData != null) {
-      _isRestoringSession = true;
-      notifyListeners();
+      final localUser = NuvexTelegramUser.deserialize(savedUserData);
+      if (localUser != null) {
+        _currentUser = localUser;
+        _status = AuthStatus.authenticated;
+        _isRestoringSession = true;
+        notifyListeners();
 
-      try {
-        final targetDc = savedDcId != null
-            ? TelegramDc.forId(savedDcId)
-            : TelegramDc.dc2;
+        try {
+          final targetDc = savedDcId != null
+              ? TelegramDc.forId(savedDcId)
+              : TelegramDc.dc2;
 
-        final conn = await _telegramService.connect(
-          apiId: creds.apiId,
-          apiHash: creds.apiHash,
-          savedSessionJson: savedSession,
-          dc: targetDc,
-        );
+          final conn = await _telegramService.connect(
+            apiId: creds.apiId,
+            apiHash: creds.apiHash,
+            savedSessionJson: savedSession,
+            dc: targetDc,
+          );
 
-        if (conn.isSuccess) {
-          _connectedDcId = conn.dcId;
-          _authKeyId = conn.authKeyId;
+          if (conn.isSuccess) {
+            _connectedDcId = conn.dcId;
+            _authKeyId = conn.authKeyId;
+            _isBackendReachable = true;
 
-          final verifiedUser = await _telegramService.verifyExistingSession();
-          if (verifiedUser != null) {
-            _currentUser = verifiedUser;
-            _status = AuthStatus.authenticated;
+            final verifiedUser = await _telegramService.verifyExistingSession();
+            if (verifiedUser != null) {
+              _currentUser = verifiedUser;
+              await _persistSessionAndUser(verifiedUser);
+            }
+          } else {
+            // Backend temporarily unreachable (offline or timeout); preserve authenticated state!
+            _isBackendReachable = false;
+            debugPrint(
+              '[AUTH] Backend connection unreachable during startup: ${conn.errorMessage}',
+            );
+          }
+        } on SocketException catch (e) {
+          _isBackendReachable = false;
+          debugPrint('[AUTH] Offline startup: SocketException ($e)');
+        } on TimeoutException catch (e) {
+          _isBackendReachable = false;
+          debugPrint('[AUTH] Offline startup: TimeoutException ($e)');
+        } catch (e) {
+          final errStr = e.toString().toUpperCase();
+          if (errStr.contains('AUTH_KEY_UNREGISTERED') ||
+              errStr.contains('SESSION_REVOKED') ||
+              errStr.contains('USER_DEACTIVATED') ||
+              errStr.contains('401')) {
+            // Actual authentication failure: clear invalid session
+            debugPrint('[AUTH] Genuine authentication failure: $e');
+            await _secureStore.clearSession();
+            _currentUser = null;
+            _status = AuthStatus.ready;
+            _errorMessage = 'Session expired. Please sign in again.';
             _isRestoringSession = false;
-            await _persistSessionAndUser(verifiedUser);
             notifyListeners();
             return;
           } else {
-            // Offline fallback: if network check timed out, restore saved user profile
-            final localUser = NuvexTelegramUser.deserialize(savedUserData);
-            if (localUser != null) {
-              _currentUser = localUser;
-              _status = AuthStatus.authenticated;
-              _isRestoringSession = false;
-              notifyListeners();
-              return;
-            }
+            // Transient network or handshake failure; preserve authenticated state!
+            _isBackendReachable = false;
+            debugPrint('[AUTH] Startup connection transient error: $e');
           }
+        } finally {
+          _isRestoringSession = false;
+          notifyListeners();
         }
-      } catch (_) {
-        // Clear invalid session on error
-        await _secureStore.clearSession();
+        return;
       }
-
-      _isRestoringSession = false;
     }
 
     _status = AuthStatus.ready;
     notifyListeners();
+  }
+
+  /// Attempts to reconnect to the backend if previously unreachable, without affecting authenticated state.
+  Future<bool> retryBackendConnection() async {
+    if (_status != AuthStatus.authenticated ||
+        _isRestoringSession ||
+        _savedAppId == null ||
+        _savedAppHash == null) {
+      return false;
+    }
+    final savedSession = await _secureStore.getSession();
+    if (savedSession == null || savedSession.isEmpty) return false;
+    final savedDcId = await _secureStore.getDcId();
+    final targetDc = savedDcId != null
+        ? TelegramDc.forId(savedDcId)
+        : TelegramDc.dc2;
+
+    _isRestoringSession = true;
+    notifyListeners();
+    try {
+      final conn = await _telegramService.connect(
+        apiId: _savedAppId!,
+        apiHash: _savedAppHash!,
+        savedSessionJson: savedSession,
+        dc: targetDc,
+      );
+      if (conn.isSuccess) {
+        _connectedDcId = conn.dcId;
+        _authKeyId = conn.authKeyId;
+        _isBackendReachable = true;
+        final verifiedUser = await _telegramService.verifyExistingSession();
+        if (verifiedUser != null) {
+          _currentUser = verifiedUser;
+          await _persistSessionAndUser(verifiedUser);
+        }
+        return true;
+      } else {
+        _isBackendReachable = false;
+        return false;
+      }
+    } catch (_) {
+      _isBackendReachable = false;
+      return false;
+    } finally {
+      _isRestoringSession = false;
+      notifyListeners();
+    }
   }
 
   /// Connects to Telegram MTProto gateway using the provided App ID & Hash.

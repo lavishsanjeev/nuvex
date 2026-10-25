@@ -12,6 +12,7 @@
 .svn/
 .swiftpm/
 migrate_working_dir/
+Glossy Blue Ribbon Cloud Icon.png
 
 # IntelliJ related
 *.iml
@@ -55,3 +56,18 @@ session.json
 credentials.json
 .env*
 
+# Local SQLite databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Keystore & Android release secrets
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+key.properties

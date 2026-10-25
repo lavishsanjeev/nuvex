@@ -35,6 +35,11 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
+        <!-- Disable Impeller on Android to eliminate Vulkan external texture synchronization flickering and glittering during video playback -->
+        <meta-data
+            android:name="io.flutter.embedding.android.EnableImpeller"
+            android:value="false" />
+
         <!-- Native Android FileProvider for sharing media files -->
         <provider
             android:name="androidx.core.content.FileProvider"

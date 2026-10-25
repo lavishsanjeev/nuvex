@@ -342,10 +342,10 @@ class MediaRepository {
       await _database.initialize();
     }
 
-    // 1. If full media is already downloaded, it serves as the full-res thumbnail
-    if (file.localPath != null && file.localPath!.isNotEmpty) {
+    // 1. If full media is already downloaded and is an image, it serves as the full-res thumbnail
+    if (!file.isVideo && file.localPath != null && file.localPath!.isNotEmpty) {
       final existing = File(file.localPath!);
-      if (existing.existsSync() && existing.lengthSync() > 0) {
+      if (await existing.exists() && await existing.length() > 0) {
         return file;
       }
     }
@@ -353,7 +353,7 @@ class MediaRepository {
     // 2. If existing thumbnail path is valid on disk and is a genuine HQ thumbnail, reuse immediately
     if (file.thumbnailPath != null && file.thumbnailPath!.isNotEmpty) {
       final existing = File(file.thumbnailPath!);
-      if (isValidHqThumbnail(existing)) {
+      if (await isValidHqThumbnailAsync(existing)) {
         return file;
       }
     }
@@ -382,7 +382,7 @@ class MediaRepository {
     final targetPath = '$thumbsPath/${file.telegramMessageId}_hq.jpg';
     final targetFile = File(targetPath);
 
-    if (isValidHqThumbnail(targetFile)) {
+    if (await isValidHqThumbnailAsync(targetFile)) {
       final updated = file.copyWith(thumbnailPath: targetPath);
       if (saveToDatabase && file.thumbnailPath != targetPath) {
         await _database.upsertFiles([updated]);
@@ -392,7 +392,7 @@ class MediaRepository {
 
     return _thumbLimiter.run(() async {
       // Re-check if written while waiting in queue
-      if (isValidHqThumbnail(targetFile)) {
+      if (await isValidHqThumbnailAsync(targetFile)) {
         final updated = file.copyWith(thumbnailPath: targetPath);
         if (saveToDatabase && file.thumbnailPath != targetPath) {
           await _database.upsertFiles([updated]);
@@ -440,7 +440,7 @@ class MediaRepository {
       // 1. Check local original
       if (file.localPath != null && file.localPath!.isNotEmpty) {
         final existing = File(file.localPath!);
-        if (existing.existsSync() && existing.lengthSync() > 0) {
+        if (await existing.exists() && await existing.length() > 0) {
           continue;
         }
       }
@@ -448,7 +448,7 @@ class MediaRepository {
       // 2. Check existing thumbnailPath
       if (file.thumbnailPath != null && file.thumbnailPath!.isNotEmpty) {
         final existing = File(file.thumbnailPath!);
-        if (isValidHqThumbnail(existing)) {
+        if (await isValidHqThumbnailAsync(existing)) {
           continue;
         }
       }
@@ -456,7 +456,7 @@ class MediaRepository {
       // 3. Check target disk location
       final targetPath = '$thumbsPath/${file.telegramMessageId}_hq.jpg';
       final targetFile = File(targetPath);
-      if (isValidHqThumbnail(targetFile)) {
+      if (await isValidHqThumbnailAsync(targetFile)) {
         final updated = file.copyWith(thumbnailPath: targetPath);
         results[i] = updated;
         if (file.thumbnailPath != targetPath) {
@@ -537,6 +537,22 @@ class MediaRepository {
     } finally {
       _inFlightDownloads.remove(msgId);
     }
+  }
+
+  /// Cached access to the nuvex_media directory.
+  Future<String> getMediaDirectory() async {
+    String basePath;
+    try {
+      final dir = await getApplicationDocumentsDirectory().timeout(
+        const Duration(milliseconds: 500),
+      );
+      basePath = dir.path;
+    } catch (_) {
+      basePath = Directory.systemTemp.path;
+    }
+    final mediaPath = '$basePath/nuvex_media';
+    _ensureNoMedia(mediaPath);
+    return mediaPath;
   }
 
   Future<RemoteFile> _executeDownload(

@@ -8,8 +8,11 @@ import '../auth/controllers/auth_controller.dart';
 import '../../telegram/telegram_media_service.dart';
 import 'controllers/media_controller.dart';
 import 'media_viewer_screen.dart';
+import '../onboarding/services/onboarding_service.dart';
+import '../onboarding/widgets/onboarding_guidance_sheet.dart';
 import 'repositories/media_repository.dart';
 import 'widgets/album_card.dart';
+import 'widgets/nuvex_loading_view.dart';
 import 'widgets/media_tile.dart';
 import 'widgets/selection_action_bar.dart';
 import 'widgets/upload_queue_sheet.dart';
@@ -26,15 +29,23 @@ import 'widgets/upload_queue_sheet.dart';
 class PhotosScreen extends StatefulWidget {
   final AuthController? controller;
   final MediaController? mediaController;
+  final bool autoShowGuidance;
 
-  const PhotosScreen({super.key, this.controller, this.mediaController});
+  const PhotosScreen({
+    super.key,
+    this.controller,
+    this.mediaController,
+    this.autoShowGuidance = false,
+  });
 
   @override
   State<PhotosScreen> createState() => _PhotosScreenState();
 }
 
-class _PhotosScreenState extends State<PhotosScreen> {
+class _PhotosScreenState extends State<PhotosScreen>
+    with WidgetsBindingObserver {
   late final MediaController _mediaController;
+  final OnboardingService _onboardingService = OnboardingService();
 
   @override
   void initState() {
@@ -50,15 +61,30 @@ class _PhotosScreenState extends State<PhotosScreen> {
                 )
               : null,
         );
+    WidgetsBinding.instance.addObserver(this);
     _mediaController.addListener(_onMediaChanged);
     _mediaController.initializeAndSync();
+    _checkFirstRunGuidance();
+  }
+
+  Future<void> _checkFirstRunGuidance() async {
+    final hasSeen = await _onboardingService.initialize();
+    if (widget.autoShowGuidance && !hasSeen && mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          OnboardingGuidanceSheet.show(context, service: _onboardingService);
+        }
+      });
+    }
   }
 
   int _lastRequestedBatchIndex = -1;
+  int _lastPrefetchedBatchIndex = -1;
   int _lastMediaCount = -1;
   bool _lastIsSyncing = false;
   bool _lastSelectionMode = false;
   int _lastSelectedCount = 0;
+  double _lastScrollOffset = 0.0;
 
   void _onMediaChanged() {
     if (!mounted) return;
@@ -68,6 +94,10 @@ class _PhotosScreenState extends State<PhotosScreen> {
     final selectedCount = _mediaController.selectedCount;
 
     // Only rebuild entire grid when screen-level state changes
+    if (count != _lastMediaCount) {
+      _lastRequestedBatchIndex = -1;
+      _lastPrefetchedBatchIndex = -1;
+    }
     if (count != _lastMediaCount ||
         syncing != _lastIsSyncing ||
         selectionMode != _lastSelectionMode ||
@@ -80,8 +110,32 @@ class _PhotosScreenState extends State<PhotosScreen> {
     }
   }
 
+  bool _isAutoResuming = false;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      if ((widget.controller?.isOffline == true ||
+              _mediaController.hasError ||
+              _mediaController.recentMedia.isEmpty) &&
+          !_mediaController.isSyncing &&
+          !_isAutoResuming) {
+        _isAutoResuming = true;
+        widget.controller
+            ?.retryBackendConnection()
+            .then((_) {
+              return _mediaController.syncMedia();
+            })
+            .whenComplete(() {
+              _isAutoResuming = false;
+            });
+      }
+    }
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _mediaController.removeListener(_onMediaChanged);
     super.dispose();
   }
@@ -157,10 +211,6 @@ class _PhotosScreenState extends State<PhotosScreen> {
                       ),
                       itemCount: media.length,
                       itemBuilder: (context, index) {
-                        // Prefetch batch when crossing halfway mark in current batch
-                        if (index % 12 == 0) {
-                          _mediaController.requestThumbnailBatchForIndex(index);
-                        }
                         final item = media[index];
                         final isSelected = _mediaController.isFileSelected(
                           item.telegramMessageId,
@@ -224,6 +274,10 @@ class _PhotosScreenState extends State<PhotosScreen> {
     int totalItems,
   ) {
     if (totalItems == 0) return;
+    final double delta = offset - _lastScrollOffset;
+    _lastScrollOffset = offset;
+    final int scrollDir = delta > 0 ? 1 : (delta < 0 ? -1 : 0);
+
     final rowHeight = screenWidth / crossAxisCount;
     const approxHeaderHeight = 280.0;
     final gridOffset = math.max(0.0, offset - approxHeaderHeight);
@@ -232,9 +286,21 @@ class _PhotosScreenState extends State<PhotosScreen> {
     final batchIndex = visibleIndex ~/ 24;
     final indexInBatch = visibleIndex % 24;
 
-    if (batchIndex != _lastRequestedBatchIndex || indexInBatch >= 12) {
+    if (batchIndex != _lastRequestedBatchIndex) {
       _lastRequestedBatchIndex = batchIndex;
-      _mediaController.requestThumbnailBatchForIndex(visibleIndex);
+      _mediaController.requestThumbnailBatchForIndex(
+        visibleIndex,
+        scrollDirection: scrollDir,
+      );
+    }
+    // Trigger the midpoint prefetch only once per batch, not on every scroll
+    // notification after the threshold has been crossed.
+    if (indexInBatch >= 12 && _lastPrefetchedBatchIndex != batchIndex) {
+      _lastPrefetchedBatchIndex = batchIndex;
+      _mediaController.requestThumbnailBatchForIndex(
+        visibleIndex,
+        scrollDirection: scrollDir,
+      );
     }
   }
 
@@ -242,7 +308,7 @@ class _PhotosScreenState extends State<PhotosScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // ── Top Header: Branding + Upload Queue + Bell + Profile ──
+        // â”€â”€ Top Header: Branding + Upload Queue + Bell + Profile â”€â”€
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20),
           child: Row(
@@ -326,26 +392,57 @@ class _PhotosScreenState extends State<PhotosScreen> {
                     ),
                   ),
                   const SizedBox(width: 10),
-                  Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      color: NuvexColors.white,
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: const Color(0xFFE5E9F0),
-                        width: 1,
-                      ),
-                    ),
-                    child: IconButton(
-                      icon: const Icon(
-                        Icons.notifications_none_rounded,
-                        size: 20,
-                        color: NuvexColors.darkNavy,
-                      ),
-                      padding: EdgeInsets.zero,
-                      onPressed: () {},
-                    ),
+                  ValueListenableBuilder<bool>(
+                    valueListenable: _onboardingService.hasUnreadGuidance,
+                    builder: (context, hasUnread, _) {
+                      return Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: NuvexColors.white,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: const Color(0xFFE5E9F0),
+                            width: 1,
+                          ),
+                        ),
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            IconButton(
+                              key: const ValueKey('notifications_bell_button'),
+                              icon: const Icon(
+                                Icons.notifications_none_rounded,
+                                size: 20,
+                                color: NuvexColors.darkNavy,
+                              ),
+                              padding: EdgeInsets.zero,
+                              tooltip: "What's New & Tips",
+                              onPressed: () {
+                                OnboardingGuidanceSheet.show(
+                                  context,
+                                  service: _onboardingService,
+                                );
+                              },
+                            ),
+                            if (hasUnread)
+                              Positioned(
+                                top: 9,
+                                right: 9,
+                                child: Container(
+                                  key: const ValueKey('notification_badge_dot'),
+                                  width: 8,
+                                  height: 8,
+                                  decoration: const BoxDecoration(
+                                    color: NuvexColors.primaryBlue,
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      );
+                    },
                   ),
                   const SizedBox(width: 10),
                   Tooltip(
@@ -403,7 +500,7 @@ class _PhotosScreenState extends State<PhotosScreen> {
 
         const SizedBox(height: 6),
 
-        // ── Subtitle ──
+        // â”€â”€ Subtitle â”€â”€
         const Padding(
           padding: EdgeInsets.symmetric(horizontal: 20),
           child: Text(
@@ -427,7 +524,7 @@ class _PhotosScreenState extends State<PhotosScreen> {
       children: [
         const SizedBox(height: 28),
 
-        // ── Albums Section ──
+        // â”€â”€ Albums Section â”€â”€
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20),
           child: Row(
@@ -600,7 +697,7 @@ class _PhotosScreenState extends State<PhotosScreen> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
-                    'Uploading $totalActive ${totalActive == 1 ? 'file' : 'files'} to Telegram Saved Messages...',
+                    'Uploading $totalActive ${totalActive == 1 ? 'file' : 'files'} to cloud library...',
                     style: const TextStyle(
                       fontFamily: NuvexTypography.primaryFamily,
                       fontSize: 13,
@@ -625,80 +722,109 @@ class _PhotosScreenState extends State<PhotosScreen> {
   Widget _buildRecentContent() {
     // 1. Initial Loading State (when no local DB cache is present)
     if (_mediaController.isLoading && _mediaController.recentMedia.isEmpty) {
+      return const NuvexLoadingView.galleryGrid();
+    }
+
+    // 2. Error or Offline State (when no local DB cache is present)
+    if (_mediaController.hasError && _mediaController.recentMedia.isEmpty) {
+      final isOffline =
+          widget.controller?.isOffline == true ||
+          (_mediaController.errorMessage?.toLowerCase().contains('connect') ??
+              false) ||
+          (_mediaController.errorMessage?.toLowerCase().contains('network') ??
+              false) ||
+          (_mediaController.errorMessage?.toLowerCase().contains('timed out') ??
+              false) ||
+          (_mediaController.errorMessage?.toLowerCase().contains(
+                'unreachable',
+              ) ??
+              false);
+
       return Padding(
         padding: const EdgeInsets.symmetric(horizontal: 20),
         child: Container(
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: 48),
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 36),
           decoration: BoxDecoration(
             color: NuvexColors.white,
             borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: const Color(0xFFE5E9F0), width: 1),
-          ),
-          child: const Column(
-            children: [
-              SizedBox(
-                width: 32,
-                height: 32,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2.5,
-                  color: NuvexColors.primaryBlue,
-                ),
-              ),
-              SizedBox(height: 16),
-              Text(
-                'Connecting to Telegram storage...',
-                style: TextStyle(
-                  fontFamily: NuvexTypography.primaryFamily,
-                  fontSize: 14,
-                  color: NuvexColors.secondaryText,
-                ),
+            border: Border.all(
+              color: isOffline
+                  ? const Color(0xFFE2E8F0)
+                  : const Color(0xFFFCA5A5),
+              width: 1,
+            ),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x06000000),
+                blurRadius: 16,
+                offset: Offset(0, 4),
               ),
             ],
           ),
-        ),
-      );
-    }
-
-    // 2. Error State (with Retry Button)
-    if (_mediaController.hasError && _mediaController.recentMedia.isEmpty) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20),
-        child: Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: const Color(0xFFFEF2F2),
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: const Color(0xFFFCA5A5), width: 1),
-          ),
           child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(
-                Icons.cloud_off_rounded,
-                size: 40,
-                color: NuvexColors.errorRed,
+              Container(
+                width: 64,
+                height: 64,
+                decoration: BoxDecoration(
+                  color: isOffline
+                      ? const Color(0xFFEFF6FF)
+                      : const Color(0xFFFEF2F2),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  isOffline ? Icons.wifi_off_rounded : Icons.cloud_off_rounded,
+                  size: 32,
+                  color: isOffline
+                      ? NuvexColors.primaryBlue
+                      : NuvexColors.errorRed,
+                ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 16),
               Text(
-                _mediaController.errorMessage ?? 'Unable to load media.',
+                isOffline ? "You're offline" : 'Unable to load media',
+                style: const TextStyle(
+                  fontFamily: NuvexTypography.primaryFamily,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                  color: NuvexColors.darkNavy,
+                  letterSpacing: -0.3,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                isOffline
+                    ? 'Connect to the internet to sync and browse your cloud library.'
+                    : (_mediaController.errorMessage ??
+                          'An error occurred while loading media.'),
                 textAlign: TextAlign.center,
                 style: const TextStyle(
                   fontFamily: NuvexTypography.primaryFamily,
                   fontSize: 14,
-                  color: Color(0xFF991B1B),
+                  color: NuvexColors.secondaryText,
+                  height: 1.4,
                 ),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 20),
               ElevatedButton.icon(
-                onPressed: () => _mediaController.retry(),
+                onPressed: () {
+                  widget.controller?.retryBackendConnection();
+                  _mediaController.retry();
+                },
                 icon: const Icon(Icons.refresh_rounded, size: 18),
-                label: const Text('Retry'),
+                label: Text(isOffline ? 'Retry Connection' : 'Retry'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: NuvexColors.primaryBlue,
                   foregroundColor: Colors.white,
+                  elevation: 0,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 22,
+                    vertical: 12,
+                  ),
                   shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
+                    borderRadius: BorderRadius.circular(14),
                   ),
                 ),
               ),
